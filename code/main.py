@@ -1,13 +1,16 @@
 import sys
-import os
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QApplication
+
+from app.config import AppConfig
 from ui.main_window import MainWindow
 from ui.splash_screen import SplashScreen
-from app.config import AppConfig
 
 
 def main():

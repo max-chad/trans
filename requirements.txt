@@ -1,0 +1,4 @@
+faster-whisper
+llama-cpp-python
+pyyaml
+srt

@@ -23,5 +23,4 @@ class TranscriptionTask:
     result_path: Optional[Path] = None
     error: Optional[str] = None
     device: str = "cpu"
-    use_g4f_correction: bool = True
-    g4f_model: str = "gpt-4o-mini"
+    allow_remote: bool = False

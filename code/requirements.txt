@@ -7,11 +7,9 @@ torchvision
 torchaudio
 
 PyQt6
-openai-whisper
+faster-whisper
+llama-cpp-python
+pyyaml
 srt
 numpy==1.26.4
-llvmlite==0.41.1
-numba==0.58.1
 moviepy==1.0.3
-deep-translator
-g4f

@@ -1,16 +1,19 @@
 from pathlib import Path
 import time
 
-from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
-import torch
+from PyQt6.QtWidgets import *
 
-from app.models import TranscriptionTask, DeviceType
-from app.worker import TranscriptionWorker
-from app.translator import TranslationWorker, TranslationTask
+try:  # pragma: no cover - optional dependency for UI hints
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
+
 from app.config import AppConfig
-from .task_widget import VideoTaskWidget
+from app.models import DeviceType, TranscriptionTask
+from app.worker import TranscriptionWorker
 from .styles import AppTheme
+from .task_widget import VideoTaskWidget
 
 
 class MainWindow(QMainWindow):
@@ -19,17 +22,12 @@ class MainWindow(QMainWindow):
         self.config = config
         self.tasks = {}
         self.task_widgets = {}
-        self.worker = TranscriptionWorker()
+        self.worker = TranscriptionWorker(self.config)
         self.worker.progress_updated.connect(self.on_progress_updated)
         self.worker.task_completed.connect(self.on_task_completed)
         self.worker.task_failed.connect(self.on_task_failed)
         self.worker.log_message.connect(self.log_message)
         self.worker.start()
-        self.translator = TranslationWorker()
-        self.translator.translation_completed.connect(self.on_translation_completed)
-        self.translator.translation_failed.connect(self.on_translation_failed)
-        self.translator.log_message.connect(self.log_message)
-        self.translator.start()
         self.init_ui()
         self.load_settings()
 
@@ -147,7 +145,10 @@ class MainWindow(QMainWindow):
         self.cpu_radio.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
         self.gpu_radio = QRadioButton("GPU (CUDA)")
         self.gpu_radio.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
-        self.gpu_radio.setEnabled(torch.cuda.is_available())
+        can_use_gpu = bool(torch and torch.cuda.is_available())
+        self.gpu_radio.setEnabled(can_use_gpu)
+        if not can_use_gpu:
+            self.gpu_radio.setToolTip("CUDA недоступна")
         self.device_group.addButton(self.cpu_radio)
         self.device_group.addButton(self.gpu_radio)
         device_layout.addWidget(self.cpu_radio)
@@ -165,11 +166,15 @@ class MainWindow(QMainWindow):
         format_layout.addWidget(self.srt_radio)
         format_layout.addWidget(self.txt_radio)
         layout.addLayout(format_layout, 4, 1, 1, 2)
-        layout.addWidget(QLabel("Перевести на язык:"), 5, 0)
-        self.translate_lang_combo = QComboBox()
-        self.translate_lang_combo.addItems(["en", "ru", "de", "fr", "es", "it", "uk", "pl"])
-        self.translate_lang_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        layout.addWidget(self.translate_lang_combo, 5, 1, 1, 2)
+        layout.addWidget(QLabel("Коррекция текста:"), 5, 0)
+        self.corrector_combo = QComboBox()
+        self.corrector_combo.addItems(["rules", "llm"])
+        self.corrector_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
+        layout.addWidget(self.corrector_combo, 5, 1, 1, 2)
+
+        self.remote_checkbox = QCheckBox("Разрешить удалённые сервисы")
+        self.remote_checkbox.setStyleSheet(AppTheme.CHECKBOX_STYLE)
+        layout.addWidget(self.remote_checkbox, 6, 0, 1, 3)
         return controls_group
 
     def _create_right_panel(self):
@@ -209,23 +214,27 @@ class MainWindow(QMainWindow):
         self.output_label.setText(self.config.get("output_dir"))
         self.model_combo.setCurrentText(self.config.get("model_size"))
         self.lang_combo.setCurrentText(self.config.get("language"))
-        self.translate_lang_combo.setCurrentText(self.config.get("translate_lang") or "en")
-        if self.config.get("device") == "cuda":
+        if self.config.get("device") == "cuda" and self.gpu_radio.isEnabled():
             self.gpu_radio.setChecked(True)
         else:
             self.cpu_radio.setChecked(True)
+            if not self.gpu_radio.isEnabled():
+                self.config.set("device", "cpu")
         if self.config.get("output_format") == "txt":
             self.txt_radio.setChecked(True)
         else:
             self.srt_radio.setChecked(True)
+        self.corrector_combo.setCurrentText(self.config.get("llm_backend") or "rules")
+        self.remote_checkbox.setChecked(bool(self.config.get("allow_remote")))
 
     def save_settings(self):
         self.config.set("output_dir", self.output_label.text())
         self.config.set("model_size", self.model_combo.currentText())
         self.config.set("language", self.lang_combo.currentText())
-        self.config.set("translate_lang", self.translate_lang_combo.currentText())
         self.config.set("device", "cuda" if self.gpu_radio.isChecked() else "cpu")
         self.config.set("output_format", "txt" if self.txt_radio.isChecked() else "srt")
+        self.config.set("llm_backend", self.corrector_combo.currentText())
+        self.config.set("allow_remote", self.remote_checkbox.isChecked())
 
     def browse_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Выберите видео файлы", "",
@@ -250,7 +259,6 @@ class MainWindow(QMainWindow):
     def add_task_widget(self, task):
         widget = VideoTaskWidget(task)
         widget.remove_requested.connect(self.remove_task)
-        widget.translate_requested.connect(self.handle_translation_request)
         self.task_widgets[task.task_id] = widget
         count = self.tasks_layout.count()
         self.tasks_layout.insertWidget(count - 1, widget)
@@ -274,15 +282,16 @@ class MainWindow(QMainWindow):
         self.process_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.worker.resume_processing()
+        output_dir = self.config.output_directory()
+        output_dir.mkdir(parents=True, exist_ok=True)
         for task_id, task in self.tasks.items():
             if task.status == "pending":
-                task.output_dir = Path(self.config.get("output_dir"))
+                task.output_dir = output_dir
                 task.output_format = self.config.get("output_format")
                 task.language = self.config.get("language")
                 task.model_size = self.config.get("model_size")
                 task.device = self.config.get("device")
-                task.use_g4f_correction = bool(self.config.get("use_g4f_correction"))
-                task.g4f_model = self.config.get("g4f_model")
+                task.allow_remote = bool(self.config.get("allow_remote"))
                 task.status = "queued"
                 self.worker.add_task(task)
         self.log_message("info", f"Запущена обработка {len(self.tasks)} задач.")
@@ -304,8 +313,6 @@ class MainWindow(QMainWindow):
         if task_id in self.tasks:
             self.tasks[task_id].status = "completed"
             self.tasks[task_id].result_path = Path(output_path)
-        if task_id in self.task_widgets:
-            self.task_widgets[task_id].show_translation_controls()
         self.check_all_tasks_done()
 
     def on_task_failed(self, task_id, error):
@@ -315,40 +322,6 @@ class MainWindow(QMainWindow):
             self.tasks[task_id].status = "failed"
             self.tasks[task_id].error = error
         self.check_all_tasks_done()
-
-    def handle_translation_request(self, task_id: str):
-        task = self.tasks.get(task_id)
-        if not task or not task.result_path:
-            self.log_message("error", "Исходный файл для перевода не найден.")
-            return
-        self.save_settings()
-        target_lang = self.config.get("translate_lang")
-        if task.language != "auto" and task.language == target_lang:
-            self.log_message("warning", "Исходный язык и язык перевода совпадают.")
-            QMessageBox.warning(self, "Перевод", "Исходный язык и язык перевода совпадают.")
-            return
-        widget = self.task_widgets.get(task_id)
-        if widget:
-            widget.set_status_translating()
-        translation_task = TranslationTask(
-            task_id=task_id,
-            source_path=task.result_path,
-            target_lang=target_lang,
-            use_g4f=bool(self.config.get("use_g4f_translation")),
-            g4f_model=self.config.get("g4f_model"),
-            source_lang=self.config.get("language")
-        )
-        self.translator.add_task(translation_task)
-
-    def on_translation_completed(self, task_id: str, new_path: str):
-        widget = self.task_widgets.get(task_id)
-        if widget:
-            widget.set_status_translation_complete()
-
-    def on_translation_failed(self, task_id: str, error: str):
-        widget = self.task_widgets.get(task_id)
-        if widget:
-            widget.set_error(f"Ошибка перевода: {error}")
 
     def check_all_tasks_done(self):
         if all(t.status in ["completed", "failed", "pending"] for t in self.tasks.values()):
@@ -372,7 +345,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.save_settings()
         self.worker.stop()
-        self.translator.stop()
         self.worker.wait()
-        self.translator.wait()
         event.accept()

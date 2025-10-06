@@ -120,3 +120,12 @@ class AppTheme:
     """
 
     RADIOBUTTON_STYLE = f"QRadioButton {{ color: {TEXT_SECONDARY}; }}"
+    CHECKBOX_STYLE = f"""
+        QCheckBox {{
+            color: {TEXT_SECONDARY};
+        }}
+        QCheckBox::indicator {{
+            width: 18px;
+            height: 18px;
+        }}
+    """
