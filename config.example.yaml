@@ -1,0 +1,22 @@
+asr:
+  engine: faster-whisper
+  model: small
+  device: cuda
+  compute_type: float16
+  max_parallel: 1
+  vad: silero
+  gpu_memory_limit: 7168
+llm:
+  backend: llm
+  model_path: ./models/llm/qwen2.5-7b-instruct-q4.gguf
+  quant: q4
+  max_input_len: 4096
+  batch_size: 4
+  max_parallel: 1
+pipeline:
+  temp_dir: ./interim
+  output_dir: ./output
+  stages: [A, B, C]
+runtime:
+  allow_remote: false
+  log_level: INFO
