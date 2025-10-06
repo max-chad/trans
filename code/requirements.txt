@@ -1,0 +1,17 @@
+--index-url https://download.pytorch.org/whl/cu129
+--extra-index-url https://pypi.org/simple
+--pre
+
+torch
+torchvision
+torchaudio
+
+PyQt6
+openai-whisper
+srt
+numpy==1.26.4
+llvmlite==0.41.1
+numba==0.58.1
+moviepy==1.0.3
+deep-translator
+g4f
