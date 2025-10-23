@@ -20,6 +20,11 @@ class TranslationTask:
     lmstudio_model: str = ""
     lmstudio_api_key: str = ""
     lmstudio_batch_size: int = 40
+    lmstudio_prompt_token_limit: int = 8192
+    lmstudio_response_token_limit: int = 4096
+    lmstudio_token_margin: int = 512
+    lmstudio_load_timeout: float = 600.0
+    lmstudio_poll_interval: float = 1.5
 
 
 class TranslationWorker(QThread):
@@ -39,13 +44,16 @@ class TranslationWorker(QThread):
         base_url = (task.lmstudio_base_url or "").strip()
         model = (task.lmstudio_model or "").strip()
         if not base_url or not model:
-            raise ValueError("Настройки LM Studio для перевода не заполнены.")
+            raise ValueError("LM Studio settings are incomplete.")
         settings = LmStudioSettings(
             base_url=base_url,
             model=model,
             api_key=task.lmstudio_api_key or "",
             timeout=120.0,
             temperature=0.2,
+            max_completion_tokens=task.lmstudio_response_token_limit or 4096,
+            max_prompt_tokens=task.lmstudio_prompt_token_limit or 8192,
+            prompt_token_margin=max(0, task.lmstudio_token_margin),
         )
         return LmStudioClient(settings)
 
@@ -59,7 +67,9 @@ class TranslationWorker(QThread):
         texts = [sub.content for sub in subtitles]
         translated: list[str] = []
         batch_size = max(1, task.lmstudio_batch_size)
-        for chunk in chunked(texts, batch_size):
+        prompt_limit = max(0, task.lmstudio_prompt_token_limit)
+        token_margin = max(0, task.lmstudio_token_margin)
+        for chunk in chunked(texts, batch_size, max_tokens=prompt_limit, token_margin=token_margin):
             translated.extend(
                 client.translate_batch(chunk, task.target_lang, task.source_lang)
             )
@@ -83,7 +93,9 @@ class TranslationWorker(QThread):
             lines = [ln.strip() for ln in f.readlines() if ln.strip()]
         batch_size = max(1, task.lmstudio_batch_size)
         translated: list[str] = []
-        for chunk in chunked(lines, batch_size):
+        prompt_limit = max(0, task.lmstudio_prompt_token_limit)
+        token_margin = max(0, task.lmstudio_token_margin)
+        for chunk in chunked(lines, batch_size, max_tokens=prompt_limit, token_margin=token_margin):
             translated.extend(
                 client.translate_batch(chunk, task.target_lang, task.source_lang)
             )
@@ -97,6 +109,16 @@ class TranslationWorker(QThread):
             if not task.use_lmstudio:
                 raise ValueError("LM Studio отключён. Перевод невозможен.")
             client = self._build_client(task)
+            load_timeout = float(getattr(task, 'lmstudio_load_timeout', 0) or 0)
+            poll_interval = float(getattr(task, 'lmstudio_poll_interval', 0) or 0)
+            try:
+                client.ensure_model_loaded(
+                    lambda level, message: self.log_message.emit(level, message),
+                    timeout=load_timeout if load_timeout else 600.0,
+                    poll_interval=poll_interval if poll_interval else 1.5,
+                )
+            except LmStudioError as exc:
+                raise ValueError(f"LM Studio модель не готова: {exc}") from exc
             if task.source_path.suffix.lower() == ".srt":
                 result_path = self._translate_srt(task, client)
             elif task.source_path.suffix.lower() == ".txt":

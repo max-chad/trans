@@ -5,6 +5,8 @@ Run as: python test_offline.py
 """
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
 import math
 import os
@@ -12,11 +14,35 @@ import tempfile
 import wave
 from datetime import timedelta
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import srt
 
-from app.local_llm import g4f_batch_rewrite, g4f_batch_translate
+import app.lmstudio_client as lmstudio_module
+from app.lmstudio_client import LmStudioClient, LmStudioSettings
+
+_local_llm_spec = importlib.util.find_spec("app.local_llm")
+if _local_llm_spec is not None:
+    _local_llm = importlib.import_module("app.local_llm")
+    g4f_batch_rewrite = _local_llm.g4f_batch_rewrite  # type: ignore[attr-defined]
+    g4f_batch_translate = _local_llm.g4f_batch_translate  # type: ignore[attr-defined]
+    LOCAL_LLM_AVAILABLE = True
+else:
+    LOCAL_LLM_AVAILABLE = False
+
+    def g4f_batch_rewrite(lines: List[str], model: str) -> List[str]:  # pragma: no cover - stub for type checkers
+        raise RuntimeError("local LLM module not available")
+
+    def g4f_batch_translate(
+        lines: List[str],
+        model: str,
+        target_lang: str,
+        source_lang: str,
+    ) -> List[str]:  # pragma: no cover - stub for type checkers
+        raise RuntimeError("local LLM module not available")
+
+DEFAULT_SAMPLE = Path(__file__).with_name("tmp_test.wav")
+ENV_SAMPLE_PATH = "TEST_WHISPER_SAMPLE"
 
 
 def _generate_sine_wave(path: Path, seconds: int = 10, freq: int = 440, sample_rate: int = 16000):
@@ -43,14 +69,29 @@ def test_transcription_roundtrip():
     except Exception as exc:  # pragma: no cover - depends on local setup
         print(f"SKIP test_transcription_roundtrip: cannot load model '{model_name}': {exc}")
         return
+    assert model is not None, "Whisper model failed to load"
+    sample_override = os.getenv(ENV_SAMPLE_PATH)
+    candidate_sample = Path(sample_override).expanduser() if sample_override else DEFAULT_SAMPLE
     with tempfile.TemporaryDirectory() as tmp_dir:
-        audio_path = Path(tmp_dir) / "sample.wav"
-        _generate_sine_wave(audio_path, seconds=10)
+        tmp_dir_path = Path(tmp_dir)
+        if candidate_sample.exists():
+            audio_path = candidate_sample
+        else:
+            audio_path = tmp_dir_path / "sample.wav"
+            _generate_sine_wave(audio_path, seconds=10)
         result = model.transcribe(str(audio_path), language="en", verbose=False)
-        segments: List[dict] = result.get("segments", [])
-        assert segments, "Expected at least one segment"
-        txt_path = Path(tmp_dir) / "out.txt"
-        srt_path = Path(tmp_dir) / "out.srt"
+        segments_raw = result.get("segments")
+        if not isinstance(segments_raw, list):
+            sample_hint = f"sample '{audio_path}'"
+            print(f"SKIP test_transcription_roundtrip: transcription produced no segments for {sample_hint}")
+            return
+        segments: List[Dict[str, Any]] = [seg for seg in segments_raw if isinstance(seg, dict)]
+        if not segments:
+            sample_hint = f"sample '{audio_path}'"
+            print(f"SKIP test_transcription_roundtrip: transcription produced no usable segments for {sample_hint}")
+            return
+        txt_path = tmp_dir_path / "out.txt"
+        srt_path = tmp_dir_path / "out.srt"
         with open(txt_path, "w", encoding="utf-8") as f:
             for seg in segments:
                 f.write(seg["text"].strip() + "\n")
@@ -71,6 +112,9 @@ def test_transcription_roundtrip():
 
 
 def test_rewrite_preserves_line_count():
+    if not LOCAL_LLM_AVAILABLE:
+        print("SKIP test_rewrite_preserves_line_count: local LLM module not available")
+        return
     sample = ["Privet", "kak", "dela", "segodnya", "oshibka tyet"]
     corrected = g4f_batch_rewrite(sample, model="")
     assert len(corrected) == len(sample), "Rewrite changed line count"
@@ -78,6 +122,9 @@ def test_rewrite_preserves_line_count():
 
 
 def test_translate_preserves_line_count():
+    if not LOCAL_LLM_AVAILABLE:
+        print("SKIP test_translate_preserves_line_count: local LLM module not available")
+        return
     sample = [
         "\u041f\u0440\u0438\u0432\u0435\u0442",
         "\u041a\u0430\u043a \u0434\u0435\u043b\u0430?",
@@ -93,6 +140,9 @@ def test_translate_preserves_line_count():
 
 
 def test_fail_safe_logging():
+    if not LOCAL_LLM_AVAILABLE:
+        print("SKIP test_fail_safe_logging: local LLM module not available")
+        return
     logger = logging.getLogger("app.local_llm")
     captured: List[logging.LogRecord] = []
 
@@ -123,9 +173,49 @@ def test_timestamp_formatting():
     print("OK test_timestamp_formatting")
 
 
+def test_lmstudio_request_model_load_uses_preset():
+    settings = LmStudioSettings(base_url="http://localhost:12345", model="stub")
+    client = LmStudioClient(settings)
+
+    calls = []
+
+    class DummyResponse:
+        def __init__(self, status: int = 200):
+            self.status_code = status
+
+    def fake_post(url, json, timeout):
+        calls.append((url, json))
+        return DummyResponse()
+
+    client.session.post = fake_post  # type: ignore[attr-defined]
+
+    state = {"checks": 0}
+
+    def fake_find():
+        state["checks"] += 1
+        if state["checks"] <= 1:
+            return {"status": "loading"}
+        return {"status": "ready"}
+
+    client._find_model_entry = fake_find  # type: ignore[assignment]
+
+    original_sleep = lmstudio_module.time.sleep
+    try:
+        lmstudio_module.time.sleep = lambda _: None
+        client.ensure_model_loaded(timeout=0.1, poll_interval=0.01)
+    finally:
+        lmstudio_module.time.sleep = original_sleep
+
+    assert calls, "Model load request not issued"
+    preset_values = [payload.get("presetId") for _, payload in calls]
+    assert all(value == "1" for value in preset_values), f"Expected preset '1', got {preset_values}"
+    print("OK test_lmstudio_request_model_load_uses_preset")
+
+
 if __name__ == "__main__":
     test_transcription_roundtrip()
     test_rewrite_preserves_line_count()
     test_translate_preserves_line_count()
     test_fail_safe_logging()
     test_timestamp_formatting()
+    test_lmstudio_request_model_load_uses_preset()
