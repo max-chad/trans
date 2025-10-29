@@ -23,6 +23,7 @@ class AppConfig:
             "window_height": 800,
             "window_maximized": False,
             "splitter_sizes": [720, 480],
+            "left_splitter_sizes": [420, 580],
             "output_format": "srt",
             "language": "ru",
             "translate_lang": "en",
@@ -57,11 +58,6 @@ class AppConfig:
             "lmstudio_token_margin": 512,
             "lmstudio_load_timeout": 600,
             "lmstudio_poll_interval": 1.5,
-            "speaker_diarization_enabled": True,
-            "speaker_diarization_model": "pyannote/speaker-diarization-3.1",
-            "speaker_diarization_auth_token": "",
-            "speaker_diarization_min_speakers": 0,
-            "speaker_diarization_max_speakers": 0,
         }
         self.settings = self.load_config()
 
@@ -130,14 +126,15 @@ class AppConfig:
             if isinstance(value, str):
                 return [value]
             return list(self.defaults.get(key, []))
-        if key == "splitter_sizes":
-            value = self.settings.get(key, self.defaults.get(key, [720, 480]))
+        if key in {"splitter_sizes", "left_splitter_sizes"}:
+            default = self.defaults.get(key, [720, 480])
+            value = self.settings.get(key, default)
             if isinstance(value, list) and len(value) == 2:
                 try:
                     return [int(value[0]), int(value[1])]
                 except (TypeError, ValueError):
                     pass
-            return list(self.defaults.get(key, [720, 480]))
+            return list(default)
         if key in {
             "max_parallel_transcriptions",
             "max_parallel_corrections",
@@ -153,8 +150,6 @@ class AppConfig:
             "lmstudio_load_timeout",
             "window_width",
             "window_height",
-            "speaker_diarization_min_speakers",
-            "speaker_diarization_max_speakers",
         }:
             try:
                 return int(self.settings.get(key, self.defaults.get(key, 0)))
@@ -171,7 +166,6 @@ class AppConfig:
             "lmstudio_enabled",
             "window_maximized",
             "deep_correction_enabled",
-            "speaker_diarization_enabled",
         }:
             return bool(self.settings.get(key, self.defaults.get(key, False)))
         return self.settings.get(key, self.defaults.get(key))

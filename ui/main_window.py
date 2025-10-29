@@ -57,8 +57,8 @@ class MainWindow(QMainWindow):
         right_panel = self._create_right_panel()
         self.main_splitter.addWidget(left_panel)
         self.main_splitter.addWidget(right_panel)
-        self.main_splitter.setStretchFactor(0, 3)
-        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setStretchFactor(0, 4)
+        self.main_splitter.setStretchFactor(1, 1)
         main_layout.addWidget(self.main_splitter)
 
     def _create_left_panel(self):
@@ -66,9 +66,26 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setSpacing(20)
         self.drop_area = self._create_drop_area()
+        self.drop_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.drop_area)
-        controls = self._create_controls_panel()
-        layout.addWidget(controls)
+
+        self.left_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.left_splitter.setChildrenCollapsible(False)
+
+        controls_wrapper = QWidget()
+        controls_layout = QVBoxLayout(controls_wrapper)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(12)
+        controls_panel = self._create_controls_panel()
+        controls_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        controls_layout.addWidget(controls_panel)
+        controls_layout.addStretch()
+        self.left_splitter.addWidget(controls_wrapper)
+
+        tasks_wrapper = QWidget()
+        tasks_wrapper_layout = QVBoxLayout(tasks_wrapper)
+        tasks_wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        tasks_wrapper_layout.setSpacing(12)
         tasks_header_layout = QHBoxLayout()
         tasks_header_label = QLabel("Очередь задач")
         tasks_header_label.setStyleSheet("font-size: 18px; font-weight: bold;")
@@ -78,7 +95,8 @@ class MainWindow(QMainWindow):
         clear_all_btn.setStyleSheet(AppTheme.SECONDARY_BUTTON_STYLE)
         clear_all_btn.clicked.connect(self.clear_all_tasks)
         tasks_header_layout.addWidget(clear_all_btn)
-        layout.addLayout(tasks_header_layout)
+        tasks_wrapper_layout.addLayout(tasks_header_layout)
+
         self.tasks_scroll = QScrollArea()
         self.tasks_scroll.setWidgetResizable(True)
         self.tasks_scroll.setStyleSheet(f"""
@@ -96,7 +114,14 @@ class MainWindow(QMainWindow):
         spacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         self.tasks_layout.addItem(spacer)
         self.tasks_scroll.setWidget(self.tasks_container)
-        layout.addWidget(self.tasks_scroll)
+        tasks_wrapper_layout.addWidget(self.tasks_scroll)
+
+        self.left_splitter.addWidget(tasks_wrapper)
+        self.left_splitter.setStretchFactor(0, 2)
+        self.left_splitter.setStretchFactor(1, 3)
+        self.left_splitter.setSizes([360, 520])
+
+        layout.addWidget(self.left_splitter, stretch=1)
         return panel
 
     def _get_gpu_detection(self, force_refresh: bool = False) -> GPUDetectionResult:
@@ -313,7 +338,7 @@ class MainWindow(QMainWindow):
         self.correction_batch_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
         advanced_layout.addWidget(self.correction_batch_spin, 3, 1)
 
-        self.deep_correction_checkbox = QCheckBox("����������� ���������� ����������� ����� (��������)")
+        self.deep_correction_checkbox = QCheckBox("Глубокая коррекция текста (замедляет обработку)")
         self.deep_correction_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
         advanced_layout.addWidget(self.deep_correction_checkbox, 4, 0, 1, 4)
 
@@ -498,6 +523,12 @@ class MainWindow(QMainWindow):
                 self.main_splitter.setSizes([max(200, int(splitter_sizes[0])), max(200, int(splitter_sizes[1]))])
             except (TypeError, ValueError):
                 self.main_splitter.setSizes([int(width * 0.6), int(width * 0.4)])
+        left_sizes = self.config.get("left_splitter_sizes") or [int(height * 0.45), int(height * 0.55)]
+        if hasattr(self, "left_splitter") and isinstance(left_sizes, list) and len(left_sizes) == 2:
+            try:
+                self.left_splitter.setSizes([max(200, int(left_sizes[0])), max(200, int(left_sizes[1]))])
+            except (TypeError, ValueError):
+                self.left_splitter.setSizes([360, 520])
         self._restore_maximized = bool(self.config.get("window_maximized"))
         self.output_label.setText(self.config.get("output_dir"))
         self.model_combo.setCurrentText(self.config.get("model_size"))
@@ -592,6 +623,8 @@ class MainWindow(QMainWindow):
         self.config.set("window_height", int(height))
         self.config.set("window_maximized", maximized)
         self.config.set("splitter_sizes", self.main_splitter.sizes())
+        if hasattr(self, "left_splitter"):
+            self.config.set("left_splitter_sizes", self.left_splitter.sizes())
         self.config.set("output_dir", self.output_label.text())
         self.config.set("model_size", self.model_combo.currentText())
         self.config.set("language", self.lang_combo.currentText())
@@ -751,15 +784,6 @@ class MainWindow(QMainWindow):
                 task.lmstudio_token_margin = token_margin
                 task.lmstudio_load_timeout = load_timeout
                 task.lmstudio_poll_interval = poll_interval
-                speaker_model = str(self.config.get("speaker_diarization_model") or "").strip()
-                speaker_token = str(self.config.get("speaker_diarization_auth_token") or "").strip()
-                speaker_min = int(self.config.get("speaker_diarization_min_speakers") or 0)
-                speaker_max = int(self.config.get("speaker_diarization_max_speakers") or 0)
-                task.enable_speaker_diarization = bool(self.config.get("speaker_diarization_enabled"))
-                task.speaker_diarization_model = speaker_model
-                task.speaker_diarization_auth_token = speaker_token
-                task.speaker_min_speakers = speaker_min if speaker_min > 0 else None
-                task.speaker_max_speakers = speaker_max if speaker_max > 0 else None
                 task.pipeline_mode = processing_settings.pipeline_mode
                 task.max_parallel_transcriptions = processing_settings.max_parallel_transcriptions
                 task.max_parallel_corrections = processing_settings.max_parallel_corrections

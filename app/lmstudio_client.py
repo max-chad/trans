@@ -173,13 +173,11 @@ class LmStudioClient:
             system_prompt += f" Source language hint: {lang_hint}."
         # Flatten multi-line entries so we keep the input shape for validation later.
         normalized = [line.replace("\n", " ").strip() for line in lines]
-        message_body = "\n".join(normalized)
         messages = [
-            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": description + "\n\n" + message_body,
-            },
+                "content": _compose_user_prompt(system_prompt, description, normalized),
+            }
         ]
         completion_budget = _completion_budget(normalized, self.settings.max_completion_tokens)
         raw = self.chat_completion(messages, max_tokens=completion_budget)
@@ -210,11 +208,10 @@ class LmStudioClient:
         if source_lang and source_lang.lower() != "auto":
             description += f" The original language is {source_lang}."
         messages = [
-            {"role": "system", "content": TRANSLATE_SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": description + "\n\n" + "\n".join(normalized),
-            },
+                "content": _compose_user_prompt(TRANSLATE_SYSTEM_PROMPT, description, normalized),
+            }
         ]
         completion_budget = _completion_budget(normalized, self.settings.max_completion_tokens, multiplier=1.6)
         raw = self.chat_completion(messages, max_tokens=completion_budget)
@@ -369,6 +366,24 @@ def _completion_budget(lines: List[str], default: int, multiplier: float = 1.4) 
     if default and default > 0:
         return min(default, max(128, target))
     return max(128, target)
+
+
+def _compose_user_prompt(instructions: str, description: str, lines: List[str]) -> str:
+    # Merge system-level instructions into the user message for models that reject system roles.
+    sections: List[str] = []
+    if instructions:
+        sections.append("Instructions:")
+        sections.append(instructions.strip())
+    if description:
+        sections.append("")
+        sections.append("Task:")
+        sections.append(description.strip())
+    if lines:
+        sections.append("")
+        sections.append("Input:")
+        sections.append("\n".join(lines))
+    # Filter leading/trailing blanks introduced by missing sections.
+    return "\n".join(part for part in sections if part is not None)
 
 
 def chunked(

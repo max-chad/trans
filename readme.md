@@ -1,4 +1,4 @@
-# Video Transcriber
+# Video Transcriber (first of all nowadays it's just a beta project, not a final version)
 
 Python desktop application for offline video transcription, translation, and post-processing.
 It ships with a PyQt6 GUI, a CLI entry point, and optional integrations with Whisper, Faster
@@ -26,13 +26,7 @@ Whisper, and LM Studio for quality improvements.
    ```powershell
    pip install -r requirements.txt
    ```
-3. Copy the example configuration to your user profile and adjust as needed:
-   ```powershell
-   $target = Join-Path $env:USERPROFILE ".video-transcriber\config.json"
-   New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
-   Copy-Item config.example.json $target
-   ```
-
+   
 ## Usage
 ### GUI
 Launch the desktop interface (default when no arguments are provided):
@@ -62,6 +56,3 @@ See `CLI_USAGE.md` for additional scripts and troubleshooting tips.
 - `main.py` — entry point that dispatches between GUI and CLI modes
 - `config.example.json` — starter configuration copied to the user profile on first launch
 
-## Next Steps
-Pick a license (`LICENSE` file) before publishing, set up CI (e.g. GitHub Actions) if desired,
-and add badges or screenshots once the repository is public.

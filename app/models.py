@@ -46,16 +46,7 @@ class TranscriptionTask:
     lmstudio_token_margin: int = 512
     lmstudio_load_timeout: float = 600.0
     lmstudio_poll_interval: float = 1.5
-    enable_speaker_diarization: bool = False
-    speaker_diarization_model: str = ""
-    speaker_diarization_auth_token: str = ""
-    speaker_min_speakers: Optional[int] = None
-    speaker_max_speakers: Optional[int] = None
-    enable_speaker_diarization: bool = False
-    speaker_diarization_model: str = ""
-    speaker_diarization_auth_token: str = ""
-    speaker_min_speakers: Optional[int] = None
-    speaker_max_speakers: Optional[int] = None
+    staged_transcript_path: Optional[Path] = None
 
 
 @dataclass

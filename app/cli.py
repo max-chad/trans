@@ -67,41 +67,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Отключить этап локальной коррекции текста.",
     )
-    # Speaker diarization toggles live in a mutually exclusive group for convenient override semantics.
-    diarize_group = transcribe_parser.add_mutually_exclusive_group()
-    diarize_group.add_argument(
-        "--diarize",
-        dest="diarize",
-        action="store_true",
-        help="Enable speaker diarization to label subtitle lines by speaker.",
-    )
-    diarize_group.add_argument(
-        "--no-diarize",
-        dest="diarize",
-        action="store_false",
-        help="Disable speaker diarization even if enabled in configuration.",
-    )
-    transcribe_parser.add_argument(
-        "--speaker-model",
-        help="Speaker diarization model identifier (e.g. pyannote/speaker-diarization-3.1).",
-    )
-    transcribe_parser.add_argument(
-        "--speaker-auth-token",
-        dest="speaker_auth_token",
-        help="Authentication token for the diarization model provider.",
-    )
-    transcribe_parser.add_argument(
-        "--speaker-min-speakers",
-        dest="speaker_min_speakers",
-        type=int,
-        help="Optional lower bound on the expected number of speakers.",
-    )
-    transcribe_parser.add_argument(
-        "--speaker-max-speakers",
-        dest="speaker_max_speakers",
-        type=int,
-        help="Optional upper bound on the expected number of speakers.",
-    )
     transcribe_parser.add_argument(
         "--lmstudio-url",
         help="URL сервера LM Studio (переопределяет значение из конфигурации).",
@@ -124,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Отключить вывод прогресса и логов.",
     )
-    transcribe_parser.set_defaults(command="transcribe", diarize=None)
+    transcribe_parser.set_defaults(command="transcribe")
 
     gui_parser = subparsers.add_parser(
         "gui",
@@ -156,11 +121,6 @@ def _run_transcribe_command(args: argparse.Namespace) -> int:
             model_size=args.model,
             device=args.device,
             use_correction=False if args.no_correction else None,
-            diarize=args.diarize,
-            speaker_model=args.speaker_model,
-            speaker_auth_token=args.speaker_auth_token,
-            speaker_min_speakers=args.speaker_min_speakers,
-            speaker_max_speakers=args.speaker_max_speakers,
             config_path=args.config,
             lmstudio_base_url=args.lmstudio_url,
             lmstudio_model=args.lmstudio_model,
@@ -198,11 +158,6 @@ def transcribe_file(
     model_size: Optional[str] = None,
     device: Optional[str] = None,
     use_correction: Optional[bool] = None,
-    diarize: Optional[bool] = None,
-    speaker_model: Optional[str] = None,
-    speaker_auth_token: Optional[str] = None,
-    speaker_min_speakers: Optional[int] = None,
-    speaker_max_speakers: Optional[int] = None,
     config_path: Optional[Path] = None,
     lmstudio_base_url: Optional[str] = None,
     lmstudio_model: Optional[str] = None,
@@ -250,30 +205,6 @@ def transcribe_file(
     resolved_use_correction = (
         bool(config.get("use_local_llm_correction")) if use_correction is None else bool(use_correction)
     )
-    resolved_diarize = (
-        bool(config.get("speaker_diarization_enabled")) if diarize is None else bool(diarize)
-    )
-    resolved_speaker_model = (
-        (speaker_model or "")
-        if speaker_model is not None
-        else str(config.get("speaker_diarization_model") or "")
-    ).strip()
-    resolved_speaker_token = (
-        (speaker_auth_token or "")
-        if speaker_auth_token is not None
-        else str(config.get("speaker_diarization_auth_token") or "")
-    ).strip()
-    # Derive optional speaker count bounds, treating zero and negative numbers as unset.
-    if speaker_min_speakers is None:
-        raw_min = int(config.get("speaker_diarization_min_speakers") or 0)
-        resolved_min_speakers = raw_min if raw_min > 0 else None
-    else:
-        resolved_min_speakers = speaker_min_speakers if speaker_min_speakers > 0 else None
-    if speaker_max_speakers is None:
-        raw_max = int(config.get("speaker_diarization_max_speakers") or 0)
-        resolved_max_speakers = raw_max if raw_max > 0 else None
-    else:
-        resolved_max_speakers = speaker_max_speakers if speaker_max_speakers > 0 else None
     resolved_formats = _resolve_formats(config, formats)
 
     # Determine whether plaintext transcripts should include timestamps.
@@ -305,11 +236,6 @@ def transcribe_file(
     task.include_timestamps = timestamps_flag
     task.correction_device = str(config.get("correction_device") or settings.correction_device)
     task.outputs = requests
-    task.enable_speaker_diarization = resolved_diarize
-    task.speaker_diarization_model = resolved_speaker_model
-    task.speaker_diarization_auth_token = resolved_speaker_token
-    task.speaker_min_speakers = resolved_min_speakers
-    task.speaker_max_speakers = resolved_max_speakers
     task.pipeline_mode = settings.pipeline_mode
     task.max_parallel_transcriptions = settings.max_parallel_transcriptions
     task.max_parallel_corrections = settings.max_parallel_corrections
@@ -402,15 +328,6 @@ def _build_processing_settings(config: AppConfig) -> ProcessingSettings:
         lmstudio_token_margin=int(config.get("lmstudio_token_margin") or 512),
         lmstudio_load_timeout=float(config.get("lmstudio_load_timeout") or 600),
         lmstudio_poll_interval=float(config.get("lmstudio_poll_interval") or 1.5),
-        enable_speaker_diarization=bool(config.get("speaker_diarization_enabled")),
-        speaker_diarization_model=str(config.get("speaker_diarization_model") or ""),
-        speaker_diarization_auth_token=str(config.get("speaker_diarization_auth_token") or ""),
-        speaker_min_speakers=(
-            int(config.get("speaker_diarization_min_speakers") or 0) or None
-        ),
-        speaker_max_speakers=(
-            int(config.get("speaker_diarization_max_speakers") or 0) or None
-        ),
     )
 
 

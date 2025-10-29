@@ -1,12 +1,13 @@
 ﻿import gc
 import ctypes
-import gc
+import json
 import math
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -96,11 +97,6 @@ except ModuleNotFoundError:
     AudioFileClip = None  # type: ignore
     VideoFileClip = None  # type: ignore
 import srt
-
-try:
-    from pyannote.audio import Pipeline as PyannotePipeline  # type: ignore[import]
-except ModuleNotFoundError:
-    PyannotePipeline = None  # type: ignore[assignment]
 
 from .models import (
     OutputRequest,
@@ -219,16 +215,13 @@ class TranscriptionWorker(QThread):
         self._cumulative_task_time: float = 0.0
         self._completed_task_count: int = 0
         self._staged_mode_enabled = False
-        self._staged_corrections: List[Tuple[TranscriptionTask, List[dict]]] = []
+        self._staged_corrections: List[TranscriptionTask] = []
         self._in_correction_phase = False
         self._active_transcriptions = 0
-        self._speaker_pipeline: Optional[object] = None
-        self._speaker_pipeline_key: Optional[Tuple[str, str]] = None
-        self._speaker_pipeline_lock = threading.Lock()
 
     # Обновляем параметры обработки и при необходимости запускаем или завершаем фазу корректировки.
     def update_processing_settings(self, settings: ProcessingSettings):
-        pending_flush: List[Tuple[TranscriptionTask, List[dict]]] = []
+        pending_flush: List[TranscriptionTask] = []
         with self._lock:
             previous_staged = self._staged_mode_enabled
             self.settings = settings
@@ -238,8 +231,8 @@ class TranscriptionWorker(QThread):
                 self._staged_corrections.clear()
                 self._in_correction_phase = False
         if pending_flush:
-            for task, segments in pending_flush:
-                self._dispatch_correction(task, segments)
+            for task in pending_flush:
+                self._dispatch_correction(task)
         if self._staged_mode_enabled:
             self._maybe_start_correction_phase()
 
@@ -266,10 +259,14 @@ class TranscriptionWorker(QThread):
             with context.queue.mutex:
                 context.queue.queue.clear()
         self._drain_correction_queue()
+        pending: List[TranscriptionTask] = []
         with self._lock:
+            pending = list(self._staged_corrections)
             self._staged_corrections.clear()
             self._in_correction_phase = False
             self._active_transcriptions = 0
+        for task in pending:
+            self._cleanup_staged_transcript(task)
 
     # Сбрасываем и выгружаем модель из контекста, очищая память устройства.
     def _release_context_model(self, context: _DeviceContext):
@@ -296,24 +293,6 @@ class TranscriptionWorker(QThread):
             self._release_context_model(context)
 
     # Загружаем пайплайн diarization от pyannote и кэшируем его для повторного использования.
-    def _ensure_speaker_pipeline(self, model_id: str, auth_token: str):
-        with self._speaker_pipeline_lock:
-            key = (model_id, auth_token)
-            if self._speaker_pipeline and self._speaker_pipeline_key == key:
-                return self._speaker_pipeline
-            if PyannotePipeline is None:
-                raise RuntimeError(
-                    "pyannote.audio is not installed. Install it to enable speaker diarization."
-                )
-            try:
-                self.log_message.emit("info", f"Loading speaker diarization model: {model_id}")
-            except RuntimeError:
-                pass
-            pipeline = PyannotePipeline.from_pretrained(model_id, use_auth_token=auth_token or None)
-            self._speaker_pipeline = pipeline
-            self._speaker_pipeline_key = key
-            return pipeline
-
     @staticmethod
     # Объединяем соседние сегменты с одинаковым говорящим в один блок.
     def _group_segments_by_speaker(segments: List[dict]) -> List[dict]:
@@ -346,65 +325,6 @@ class TranscriptionWorker(QThread):
         audio_path: Optional[Path],
         segments: List[dict],
     ) -> List[dict]:
-        if not segments or not task.enable_speaker_diarization:
-            return segments
-        model_id = (task.speaker_diarization_model or "").strip()
-        if not model_id:
-            self.log_message.emit("warning", "Speaker diarization skipped: model id is empty.")
-            return segments
-        if audio_path is None or not audio_path.exists():
-            self.log_message.emit(
-                "warning", "Speaker diarization skipped: temporary audio file is unavailable."
-            )
-            return segments
-        try:
-            pipeline = self._ensure_speaker_pipeline(model_id, task.speaker_diarization_auth_token or "")
-        except Exception as exc:
-            self.log_message.emit("warning", f"Speaker diarization disabled: {exc}")
-            return segments
-        diarize_kwargs = {}
-        if task.speaker_min_speakers:
-            diarize_kwargs["min_speakers"] = int(task.speaker_min_speakers)
-        if task.speaker_max_speakers:
-            diarize_kwargs["max_speakers"] = int(task.speaker_max_speakers)
-        try:
-            annotation = pipeline(str(audio_path), **diarize_kwargs)
-        except Exception as exc:
-            self.log_message.emit("warning", f"Speaker diarization failed: {exc}")
-            return segments
-        label_map: Dict[str, str] = {}
-        next_index = 1
-        for segment in segments:
-            start = float(segment.get("start", 0.0) or 0.0)
-            end = float(segment.get("end", start) or start)
-            probe = start + (end - start) / 2 if end > start else start
-            label: Optional[str] = None
-            try:
-                label = annotation.argmax(probe)
-            except Exception:
-                label = None
-            if label is None:
-                try:
-                    window = annotation.crop(start, end)
-                except Exception:
-                    window = None
-                if window is not None:
-                    for _, _, candidate in window.itertracks(yield_label=True):
-                        label = candidate
-                        break
-            if label is None:
-                continue
-            friendly = label_map.get(label)
-            if friendly is None:
-                friendly = f"Speaker {next_index}"
-                label_map[label] = friendly
-                next_index += 1
-            segment["speaker"] = friendly
-        if not label_map:
-            self.log_message.emit(
-                "warning",
-                "Speaker diarization produced no speaker assignments. Keeping original text only.",
-            )
         return segments
 
     # Фиксируем старт обработки задачи для дальнейшей статистики.
@@ -496,6 +416,7 @@ class TranscriptionWorker(QThread):
                     task = item[0]
                     if isinstance(task, TranscriptionTask):
                         self._notify_correction_done(task.task_id)
+                        self._cleanup_staged_transcript(task)
                 self._correction_queue.task_done()
 
     # Увеличиваем счётчик одновременно выполняемых транскрибаций.
@@ -523,7 +444,7 @@ class TranscriptionWorker(QThread):
     def _maybe_start_correction_phase(self):
         if not self._staged_mode_enabled:
             return
-        pending: List[Tuple[TranscriptionTask, List[dict]]] = []
+        pending: List[TranscriptionTask] = []
         with self._lock:
             if self._in_correction_phase:
                 return
@@ -543,8 +464,8 @@ class TranscriptionWorker(QThread):
                 "info",
                 f"Starting staged correction phase for {len(pending)} task(s).",
             )
-        for task, segments in pending:
-            self._dispatch_correction(task, segments)
+        for task in pending:
+            self._dispatch_correction(task)
 
     # Проверяем, можно ли завершить текущую фазу корректировки и перейти к следующей.
     def _check_correction_phase_completion(self):
@@ -569,9 +490,91 @@ class TranscriptionWorker(QThread):
             self._dispatch_correction(task, segments)
             return
         self.progress_updated.emit(task.task_id, 75)
+        staged_path = self._create_staged_transcript(task, segments)
+        if staged_path is None:
+            self._dispatch_correction(task, segments)
+            return
         with self._lock:
-            self._staged_corrections.append((task, segments))
+            self._staged_corrections.append(task)
         self._maybe_start_correction_phase()
+
+    def _create_staged_transcript(self, task: TranscriptionTask, segments: List[dict]) -> Optional[Path]:
+        self._cleanup_staged_transcript(task)
+        staging_dir = Path(tempfile.gettempdir()) / "video-transcriber-staged"
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.log_message.emit(
+                "warning",
+                f"Failed to prepare staging directory for {task.video_path.name}: {exc}",
+            )
+            return None
+        target = staging_dir / f"{task.task_id}.json"
+        try:
+            with target.open("w", encoding="utf-8") as handle:
+                json.dump(segments, handle, ensure_ascii=False)
+        except Exception as exc:
+            self.log_message.emit(
+                "warning",
+                f"Failed to write staged transcript for {task.video_path.name}: {exc}",
+            )
+            if target.exists():
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+            return None
+        task.staged_transcript_path = target
+        return target
+
+    def _load_staged_segments(self, task: TranscriptionTask) -> List[dict]:
+        path = getattr(task, "staged_transcript_path", None)
+        if not path:
+            return []
+        try:
+            with Path(path).open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            self.log_message.emit(
+                "warning",
+                f"Staged transcript missing for {task.video_path.name}. Continuing without correction.",
+            )
+            return []
+        except json.JSONDecodeError as exc:
+            self.log_message.emit(
+                "warning",
+                f"Failed to parse staged transcript for {task.video_path.name}: {exc}",
+            )
+            return []
+        if not isinstance(data, list):
+            self.log_message.emit(
+                "warning",
+                f"Unexpected staged transcript format for {task.video_path.name}.",
+            )
+            return []
+        segments: List[dict] = []
+        for item in data:
+            if isinstance(item, dict):
+                segments.append(item)
+        return segments
+
+    def _cleanup_staged_transcript(self, task: TranscriptionTask):
+        path = getattr(task, "staged_transcript_path", None)
+        if not path:
+            return
+        try:
+            Path(path).unlink(missing_ok=True)  # type: ignore[arg-type]
+        except TypeError:
+            # Python <3.8 compatibility for missing_ok.
+            try:
+                target = Path(path)
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
+        except OSError:
+            pass
+        task.staged_transcript_path = None
 
     # Поток, применяющий локальную LLM-коррекцию к уже транскрибированным сегментам.
     def _correction_worker(self):
@@ -1016,7 +1019,11 @@ class TranscriptionWorker(QThread):
         return result.get("segments", []) or []
 
     # Отправляем сегменты в очередь локальной LLM-коррекции (или завершаем задачу сразу).
-    def _dispatch_correction(self, task: TranscriptionTask, segments: List[dict]):
+    def _dispatch_correction(self, task: TranscriptionTask, segments: Optional[List[dict]] = None):
+        if segments is None:
+            segments = self._load_staged_segments(task)
+        if not segments:
+            segments = []
         if not task.use_local_llm_correction or not segments:
             self._finalize_task(task, segments)
             return
@@ -1105,6 +1112,7 @@ class TranscriptionWorker(QThread):
             )
             self._log_task_timing(task, "failed")
         finally:
+            self._cleanup_staged_transcript(task)
             self._notify_correction_done(task.task_id)
 
     # Строим клиент для LM Studio с учётом пользовательских ограничений по токенам.
@@ -1160,10 +1168,24 @@ class TranscriptionWorker(QThread):
                 "Deep conversational correction enabled — allowing broader paraphrasing.",
             )
         for chunk in chunked(texts, batch_size, max_tokens=prompt_limit, token_margin=token_margin):
+            try:
+                self.log_message.emit(
+                    "info",
+                    f"LM Studio correction: sending {len(chunk)} line(s) (mode={prompt_mode}).",
+                )
+            except RuntimeError:
+                pass
             rewritten.extend(client.rewrite_batch(chunk, lang_hint, mode=prompt_mode))
         adjusted = self._apply_correction_margin(segments, rewritten)
         for seg, new_text in zip(segments, adjusted):
             seg["text"] = new_text
+        try:
+            self.log_message.emit(
+                "success",
+                f"LM Studio correction finished: {len(segments)} line(s) updated.",
+            )
+        except RuntimeError:
+            pass
         return segments
 
     # Подгоняем количество строк ответа LM Studio под исходное число сегментов.
@@ -1296,7 +1318,6 @@ class TranscriptionWorker(QThread):
                     os.unlink(audio_path)
                 except OSError:
                     pass
-            self._decrement_active_transcriptions()
 
     # Помещаем задачу в очередь конкретного устройства, запуская поток при необходимости.
     def _enqueue_task_for_context(self, context: _DeviceContext, task: TranscriptionTask):
@@ -1375,6 +1396,7 @@ class TranscriptionWorker(QThread):
                 self._process_task_for_context(context, task)
             finally:
                 context.active = False
+                self._decrement_active_transcriptions()
                 context.queue.task_done()
             if self.settings.release_whisper_after_batch and context.queue.empty():
                 self._release_context_model(context)

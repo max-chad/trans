@@ -6,6 +6,7 @@
     "window_height": 800,
     "window_maximized": false,
     "splitter_sizes": [720, 480],
+    "left_splitter_sizes": [420, 580],
     "output_formats_multi": ["srt"],
     "language": "auto",
     "translate_lang": "en",
@@ -25,8 +26,5 @@
     "lmstudio_enabled": true,
     "lmstudio_base_url": "http://127.0.0.1:1234/v1",
     "lmstudio_model": "google/gemma-3n-e4b",
-    "lmstudio_api_key": "",
-    "speaker_diarization_enabled": false,
-    "speaker_diarization_model": "pyannote/speaker-diarization-3.1",
-    "speaker_diarization_auth_token": ""
+    "lmstudio_api_key": ""
 }
