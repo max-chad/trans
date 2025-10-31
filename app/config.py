@@ -36,9 +36,6 @@ class AppConfig:
             "post_processing_action": "none",
             "post_processing_notification_text": "Processing complete",
             "parallel_mode": "balanced",
-            "max_parallel_transcriptions": 1,
-            "max_parallel_corrections": 2,
-            "correction_device": "auto",
             "output_formats_multi": ["srt"],
             "llama_gpu_layers": 0,
             "llama_main_gpu": 0,
@@ -136,8 +133,6 @@ class AppConfig:
                     pass
             return list(default)
         if key in {
-            "max_parallel_transcriptions",
-            "max_parallel_corrections",
             "llama_gpu_layers",
             "llama_main_gpu",
             "llama_batch_size",

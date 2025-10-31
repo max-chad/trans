@@ -31,11 +31,8 @@ class TranscriptionTask:
     backend_fallback_attempted: bool = False
     deep_correction: bool = False
     include_timestamps: bool = False
-    correction_device: str = "auto"
     outputs: List["OutputRequest"] = field(default_factory=list)
     pipeline_mode: str = "balanced"
-    max_parallel_transcriptions: int = 1
-    max_parallel_corrections: int = 1
     use_lmstudio: bool = True
     lmstudio_base_url: str = ""
     lmstudio_model: str = ""
@@ -58,9 +55,6 @@ class OutputRequest:
 @dataclass
 class ProcessingSettings:
     pipeline_mode: str = "balanced"
-    max_parallel_transcriptions: int = 1
-    max_parallel_corrections: int = 1
-    correction_device: str = "auto"
     correction_gpu_layers: int = 0
     correction_batch_size: int = 40
     release_whisper_after_batch: bool = True

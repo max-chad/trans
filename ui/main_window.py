@@ -154,10 +154,6 @@ class MainWindow(QMainWindow):
                 self.config.set("device", "cuda")
             else:
                 self.config.set("device", "cpu")
-            idx = self.correction_device_combo.findData("gpu")
-            if idx >= 0:
-                self.correction_device_combo.setCurrentIndex(idx)
-            self.config.set("correction_device", "gpu")
             if names_text:
                 self.log_message("info", f"Обнаружен CUDA GPU: {names_text}")
             else:
@@ -166,22 +162,14 @@ class MainWindow(QMainWindow):
             self.gpu_radio.setEnabled(False)
             self.hybrid_radio.setEnabled(False)
             self.cpu_radio.setChecked(True)
-            idx = self.correction_device_combo.findData("auto")
-            if idx >= 0:
-                self.correction_device_combo.setCurrentIndex(idx)
             self.config.set("device", "cpu")
-            self.config.set("correction_device", "auto")
             detail = names_text or "RTX устройство"
             self.log_message("warning", f"Обнаружен NVIDIA GPU ({detail}), но PyTorch сообщает об отсутствии CUDA. Использую CPU.")
         else:
             self.gpu_radio.setEnabled(False)
             self.hybrid_radio.setEnabled(False)
             self.cpu_radio.setChecked(True)
-            idx = self.correction_device_combo.findData("auto")
-            if idx >= 0:
-                self.correction_device_combo.setCurrentIndex(idx)
             self.config.set("device", "cpu")
-            self.config.set("correction_device", "auto")
             self.log_message("warning", "GPU не обнаружен — работа будет выполнена на CPU.")
 
     def _create_drop_area(self):
@@ -309,28 +297,6 @@ class MainWindow(QMainWindow):
         self.pipeline_mode_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
         advanced_layout.addWidget(self.pipeline_mode_combo, 0, 1, 1, 2)
 
-        advanced_layout.addWidget(QLabel("Потоков транскрибации:"), 1, 0)
-        self.transcription_parallel_spin = QSpinBox()
-        self.transcription_parallel_spin.setRange(1, 4)
-        self.transcription_parallel_spin.setValue(1)
-        self.transcription_parallel_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.transcription_parallel_spin, 1, 1)
-
-        advanced_layout.addWidget(QLabel("Параллельных коррекций:"), 1, 2)
-        self.correction_parallel_spin = QSpinBox()
-        self.correction_parallel_spin.setRange(1, 8)
-        self.correction_parallel_spin.setValue(2)
-        self.correction_parallel_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.correction_parallel_spin, 1, 3)
-
-        advanced_layout.addWidget(QLabel("Коррекция на:"), 2, 0)
-        self.correction_device_combo = QComboBox()
-        self.correction_device_combo.addItem("Авто", "auto")
-        self.correction_device_combo.addItem("CPU", "cpu")
-        self.correction_device_combo.addItem("GPU", "gpu")
-        self.correction_device_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        advanced_layout.addWidget(self.correction_device_combo, 2, 1, 1, 3)
-
         advanced_layout.addWidget(QLabel("Строк за вызов LLM:"), 3, 0)
         self.correction_batch_spin = QSpinBox()
         self.correction_batch_spin.setRange(4, 200)
@@ -423,21 +389,7 @@ class MainWindow(QMainWindow):
         advanced_layout.setRowStretch(15, 1)
         self.settings_tabs.addTab(advanced_tab, "Дополнительно")
 
-        self.pipeline_mode_combo.currentIndexChanged.connect(self._update_parallel_controls_state)
-        self._update_parallel_controls_state()
         return controls_group
-    def _update_parallel_controls_state(self):
-        mode = self.pipeline_mode_combo.currentData()
-        is_full_gpu = mode == "full_gpu"
-        self.transcription_parallel_spin.setEnabled(mode != "serial")
-        self.correction_parallel_spin.setEnabled(mode != "full_gpu")
-        if is_full_gpu:
-            idx = self.correction_device_combo.findData("gpu")
-            if idx >= 0:
-                self.correction_device_combo.setCurrentIndex(idx)
-            if self.correction_parallel_spin.value() != 1:
-                self.correction_parallel_spin.setValue(1)
-        self.correction_device_combo.setEnabled(True)
     def _update_post_action_controls(self):
         action = self.post_action_combo.currentData()
         is_notify = action == "notify"
@@ -583,16 +535,6 @@ class MainWindow(QMainWindow):
         else:
             self.pipeline_mode_combo.setCurrentIndex(0)
 
-        self.transcription_parallel_spin.setValue(int(self.config.get("max_parallel_transcriptions") or 1))
-        self.correction_parallel_spin.setValue(int(self.config.get("max_parallel_corrections") or 2))
-
-        correction_device = self.config.get("correction_device") or "auto"
-        idx = self.correction_device_combo.findData(correction_device)
-        if idx >= 0:
-            self.correction_device_combo.setCurrentIndex(idx)
-        else:
-            self.correction_device_combo.setCurrentIndex(0)
-
         batch_size = int(
             self.config.get("correction_batch_size")
             or self.config.get("llama_batch_size")
@@ -608,7 +550,6 @@ class MainWindow(QMainWindow):
             self.post_action_combo.setCurrentIndex(0)
         self.post_notification_input.setText(self.config.get("post_processing_notification_text") or "")
         self._update_post_action_controls()
-        self._update_parallel_controls_state()
 
     def save_settings(self):
         if self.isMaximized():
@@ -654,10 +595,6 @@ class MainWindow(QMainWindow):
             self.config.set("include_txt_timestamps", primary_format in {"txt_ts", "txt_timestamps"})
 
         self.config.set("parallel_mode", self.pipeline_mode_combo.currentData())
-        self.config.set("max_parallel_transcriptions", self.transcription_parallel_spin.value())
-        self.config.set("max_parallel_corrections", self.correction_parallel_spin.value())
-        correction_device = self.correction_device_combo.currentData()
-        self.config.set("correction_device", correction_device)
         self.config.set("correction_batch_size", self.correction_batch_spin.value())
         self.config.set("llama_batch_size", self.correction_batch_spin.value())
         self.config.set("lmstudio_batch_size", self.lmstudio_batch_spin.value())
@@ -666,7 +603,6 @@ class MainWindow(QMainWindow):
         self.config.set("lmstudio_token_margin", self.lmstudio_token_margin_spin.value())
         self.config.set("lmstudio_load_timeout", self.lmstudio_timeout_spin.value())
         self.config.set("lmstudio_poll_interval", float(self.lmstudio_poll_spin.value()))
-        self.config.set("llama_gpu_layers", -1 if correction_device == "gpu" else 0)
         self.config.set("post_processing_action", self.post_action_combo.currentData())
         self.config.set("post_processing_notification_text", self.post_notification_input.text().strip())
     def browse_files(self):
@@ -730,9 +666,6 @@ class MainWindow(QMainWindow):
         poll_interval = float(self.config.get("lmstudio_poll_interval") or 1.5)
         processing_settings = ProcessingSettings(
             pipeline_mode=self.config.get("parallel_mode") or "balanced",
-            max_parallel_transcriptions=int(self.config.get("max_parallel_transcriptions") or 1),
-            max_parallel_corrections=int(self.config.get("max_parallel_corrections") or 2),
-            correction_device=self.config.get("correction_device") or "auto",
             correction_batch_size=correction_batch_size,
             release_whisper_after_batch=bool(self.config.get("release_whisper_after_batch")),
             deep_correction=bool(self.config.get("deep_correction_enabled")),
@@ -785,9 +718,6 @@ class MainWindow(QMainWindow):
                 task.lmstudio_load_timeout = load_timeout
                 task.lmstudio_poll_interval = poll_interval
                 task.pipeline_mode = processing_settings.pipeline_mode
-                task.max_parallel_transcriptions = processing_settings.max_parallel_transcriptions
-                task.max_parallel_corrections = processing_settings.max_parallel_corrections
-                task.correction_device = processing_settings.correction_device
                 task.outputs = [
                     OutputRequest(format=fmt, include_timestamps=fmt in {"txt_ts", "txt_timestamps"})
                     for fmt in selected_formats

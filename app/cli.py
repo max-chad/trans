@@ -234,11 +234,8 @@ def transcribe_file(
     task.whisper_backend = backend
     task.faster_whisper_compute_type = str(config.get("faster_whisper_compute_type") or "int8")
     task.include_timestamps = timestamps_flag
-    task.correction_device = str(config.get("correction_device") or settings.correction_device)
     task.outputs = requests
     task.pipeline_mode = settings.pipeline_mode
-    task.max_parallel_transcriptions = settings.max_parallel_transcriptions
-    task.max_parallel_corrections = settings.max_parallel_corrections
     task.use_lmstudio = settings.use_lmstudio and task.use_local_llm_correction
     task.lmstudio_base_url = settings.lmstudio_base_url
     task.lmstudio_model = settings.lmstudio_model
@@ -306,9 +303,6 @@ def _build_processing_settings(config: AppConfig) -> ProcessingSettings:
     """Map persisted configuration fields into ProcessingSettings consumed by the worker."""
     return ProcessingSettings(
         pipeline_mode=str(config.get("parallel_mode") or "balanced"),
-        max_parallel_transcriptions=int(config.get("max_parallel_transcriptions") or 1),
-        max_parallel_corrections=int(config.get("max_parallel_corrections") or 1),
-        correction_device=str(config.get("correction_device") or "auto"),
         correction_gpu_layers=int(config.get("llama_gpu_layers") or 0),
         correction_batch_size=int(config.get("correction_batch_size") or 40),
         release_whisper_after_batch=bool(config.get("release_whisper_after_batch")),

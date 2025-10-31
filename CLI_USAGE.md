@@ -56,7 +56,7 @@ python main.py transcribe data\interview.mp4 `
 
 - предпочтительные форматы (`output_formats_multi` или `output_format`);
 - параметры Whisper (`model_size`, `device`, `whisper_backend`, `faster_whisper_compute_type`);
-- настройки параллелизма (`pipeline_mode`, `max_parallel_transcriptions`, `max_parallel_corrections`);
+- режим параллелизма (`pipeline_mode`);
 - параметры LM Studio (`lmstudio_*`) и локальной коррекции (`use_local_llm_correction`, `llama_*`).
 
 CLI автоматически создаёт каталог назначения, если его нет, и использует настройки из конфига как значения по умолчанию.
