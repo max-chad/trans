@@ -40,7 +40,13 @@ Run `python main.py --help` for the full list of subcommands and options. A comm
 python main.py transcribe "path\to\input.mp4" --format srt --format txt --language auto
 ```
 The CLI shares configuration with the GUI. Override settings on the command line or by editing
-`%USERPROFILE%\.video-transcriber\config.json`.
+`%USERPROFILE%\.video-transcriber\projects\<project-id>\config.json`, where `<project-id>` is a
+slug + hash derived from the absolute path of the current repository so different copies do not
+override each other. Set `VIDEO_TRANSCRIBER_CONFIG_DIR` if you need a custom location.
+
+### Transcript batch mode
+`python main.py batch [options]` exposes `TranscriptBatchProcessor` from `app.transcript_tool`. It discovers `.srt`, `.txt`, and Telegram JSON exports in the provided directory (recursive by default), then runs LM Studio-powered analysis, rewrite, or story passes and dumps artifacts to `transcript_tool_output/` (logs, reports, rewrites, stories, merged markdown when `--merge-story` is supplied). Pass `--mode` repeatedly to combine analysis, rewrite, and story outputs or use `--provider-options`, `--prompt-limit`, and `--reasoning-effort` to control how the batch worker calls LM Studio. The command respects the same `config.json` that powers the GUI so you can reuse your LM Studio settings and provider routing preferences.
+
 
 ## Tests & Diagnostics
 The project includes a smoke-test helper that exercises the offline pipeline without requiring a
@@ -54,5 +60,5 @@ See `CLI_USAGE.md` for additional scripts and troubleshooting tips.
 - `app/` — configuration, worker orchestration, CLI bindings, and GPU helpers
 - `ui/` — PyQt6 widgets, splash screen, and styling
 - `main.py` — entry point that dispatches between GUI and CLI modes
-- `config.example.json` — starter configuration copied to the user profile on first launch
+- `config.example.json` — starter configuration copied to the project-scoped folder under `~/.video-transcriber/projects/<project-id>/`
 

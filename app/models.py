@@ -39,8 +39,6 @@ class TranscriptionTask:
     lmstudio_api_key: str = ""
     lmstudio_batch_size: int = 40
     lmstudio_prompt_token_limit: int = 8192
-    lmstudio_response_token_limit: int = 4096
-    lmstudio_token_margin: int = 512
     lmstudio_load_timeout: float = 600.0
     lmstudio_poll_interval: float = 1.5
     staged_transcript_path: Optional[Path] = None
@@ -70,7 +68,5 @@ class ProcessingSettings:
     lmstudio_api_key: str = ""
     lmstudio_batch_size: int = 40
     lmstudio_prompt_token_limit: int = 8192
-    lmstudio_response_token_limit: int = 4096
-    lmstudio_token_margin: int = 512
     lmstudio_load_timeout: float = 600.0
     lmstudio_poll_interval: float = 1.5

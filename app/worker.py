@@ -98,6 +98,7 @@ except ModuleNotFoundError:
     VideoFileClip = None  # type: ignore
 import srt
 
+from .constants import DEFAULT_LMSTUDIO_RESPONSE_TOKEN_LIMIT, DEFAULT_LMSTUDIO_TOKEN_MARGIN
 from .models import (
     OutputRequest,
     ProcessingSettings,
@@ -108,6 +109,7 @@ from .lmstudio_client import (
     LmStudioError,
     LmStudioSettings,
     chunked,
+    validate_lmstudio_settings,
 )
 
 # Контекст вычислительного устройства с очередью задач и загруженной моделью.
@@ -138,6 +140,9 @@ AUDIO_EXTENSIONS = {
     ".opus",
     ".wma",
 }
+
+# Minimal gap that should be marked explicitly as silence (in seconds).
+SILENCE_GAP_SECONDS = 0.75
 
 
 # Запускаем ffmpeg через CLI и конвертируем входной файл в WAV.
@@ -606,24 +611,15 @@ class TranscriptionWorker(QThread):
                 base_url = (task.lmstudio_base_url or self.settings.lmstudio_base_url or "").strip()
                 model = (task.lmstudio_model or self.settings.lmstudio_model or "").strip()
                 api_key = (task.lmstudio_api_key or self.settings.lmstudio_api_key or "").strip()
-                if not base_url or not model:
-                    self.log_message.emit("error", "LM Studio не настроен: заполните URL и идентификатор модели.")
+                ok, reason = validate_lmstudio_settings(base_url, model, api_key)
+                if not ok:
+                    self.log_message.emit("error", reason)
                     self._finalize_task(task, segments)
                     finalized = True
                     continue
                 prompt_limit = (
                     task.lmstudio_prompt_token_limit
                     or self.settings.lmstudio_prompt_token_limit
-                    or 0
-                )
-                response_limit = (
-                    task.lmstudio_response_token_limit
-                    or self.settings.lmstudio_response_token_limit
-                    or 0
-                )
-                token_margin = (
-                    task.lmstudio_token_margin
-                    or self.settings.lmstudio_token_margin
                     or 0
                 )
                 load_timeout = (
@@ -636,7 +632,7 @@ class TranscriptionWorker(QThread):
                     or self.settings.lmstudio_poll_interval
                     or 0
                 )
-                signature = (base_url, model, api_key, prompt_limit, response_limit, token_margin, load_timeout, poll_interval)
+                signature = (base_url, model, api_key, prompt_limit, load_timeout, poll_interval)
                 if signature != client_cache_key:
                     try:
                         candidate = self._build_lmstudio_client(
@@ -644,8 +640,6 @@ class TranscriptionWorker(QThread):
                             model,
                             api_key,
                             prompt_limit,
-                            response_limit,
-                            token_margin,
                         )
                         candidate.ensure_model_loaded(
                             lambda level, message: self.log_message.emit(level, message),
@@ -893,9 +887,80 @@ class TranscriptionWorker(QThread):
         )
 
     # Сохраняем сегменты в формате .srt с поддержкой имён говорящих.
+    def _silence_entry(self, start: float, end: float) -> Optional[dict]:
+        """Return a placeholder segment for a silent gap."""
+        duration = max(0.0, end - start)
+        if duration <= 0:
+            return None
+        label = "[silence]" if duration < 1.0 else f"[silence {duration:.1f}s]"
+        return {
+            "start": start,
+            "end": end,
+            "text": label,
+            "speaker": None,
+            "is_silence": True,
+        }
+
+    def _build_word_timeline(self, segments: List[dict]) -> List[dict]:
+        """Flatten phrase-level segments into per-word timeline with silence markers."""
+        timeline: List[dict] = []
+        previous_end = 0.0
+        for seg in segments:
+            seg_start = float(seg.get("start", 0.0) or 0.0)
+            seg_end = float(seg.get("end", seg_start) or seg_start)
+            speaker = seg.get("speaker")
+            words = seg.get("words") or []
+            if words:
+                for word in words:
+                    start = float(word.get("start", seg_start) or seg_start)
+                    end = float(word.get("end", start) or start)
+                    gap = start - previous_end
+                    if gap >= SILENCE_GAP_SECONDS and start > previous_end:
+                        silence = self._silence_entry(previous_end, start)
+                        if silence:
+                            timeline.append(silence)
+                    text = (word.get("text") or word.get("word") or "").strip()
+                    if not text:
+                        continue
+                    timeline.append(
+                        {
+                            "start": start,
+                            "end": end if end > start else start,
+                            "text": text,
+                            "speaker": speaker,
+                            "is_silence": False,
+                        }
+                    )
+                    previous_end = max(previous_end, end)
+                if seg_end - previous_end >= SILENCE_GAP_SECONDS and seg_end > previous_end:
+                    silence = self._silence_entry(previous_end, seg_end)
+                    if silence:
+                        timeline.append(silence)
+                if seg_end > previous_end:
+                    previous_end = seg_end
+                continue
+            if seg_start - previous_end >= SILENCE_GAP_SECONDS and seg_start > previous_end:
+                silence = self._silence_entry(previous_end, seg_start)
+                if silence:
+                    timeline.append(silence)
+            text = seg.get("text", "").strip()
+            if text:
+                timeline.append(
+                    {
+                        "start": seg_start,
+                        "end": seg_end if seg_end > seg_start else seg_start,
+                        "text": text,
+                        "speaker": speaker,
+                        "is_silence": False,
+                    }
+                )
+            previous_end = max(previous_end, seg_end)
+        return timeline
+
     def _save_as_srt(self, segments: List[dict], output_path: Path):
         srt_segments: List[srt.Subtitle] = []
-        for i, seg in enumerate(segments, 1):
+        timeline = self._build_word_timeline(segments) or segments
+        for i, seg in enumerate(timeline, 1):
             text = seg.get("text", "").strip()
             if not text:
                 continue
@@ -926,11 +991,13 @@ class TranscriptionWorker(QThread):
     def _save_as_txt(self, segments: List[dict], output_path: Path, include_timestamps: bool = False):
         with open(output_path, "w", encoding="utf-8") as f:
             if include_timestamps:
-                for segment in segments:
+                timeline = self._build_word_timeline(segments) or segments
+                for segment in timeline:
                     text = segment.get("text", "").strip()
                     if not text:
                         continue
-                    speaker = segment.get("speaker")
+                    is_silence = bool(segment.get("is_silence"))
+                    speaker = segment.get("speaker") if not is_silence else None
                     prefix = f"{speaker}: " if speaker else ""
                     start = self._format_timestamp(segment.get("start", 0.0))
                     end = self._format_timestamp(segment.get("end", segment.get("start", 0.0)))
@@ -975,7 +1042,8 @@ class TranscriptionWorker(QThread):
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("WEBVTT\n\n")
-            for seg in segments:
+            timeline = self._build_word_timeline(segments) or segments
+            for seg in timeline:
                 start = format_vtt(seg.get("start", 0.0))
                 end = format_vtt(seg.get("end", seg.get("start", 0.0)))
                 text = seg.get("text", "").strip()
@@ -994,29 +1062,91 @@ class TranscriptionWorker(QThread):
         backend = (context.backend or "").lower()
         if backend == "faster":
             lang = None if language == "auto" else language
-            segments_iter, _ = model.transcribe(
-                str(audio_path),
-                language=lang,
-                beam_size=5,
-                vad_filter=True,
-            )
+            try:
+                segments_iter, _ = model.transcribe(
+                    str(audio_path),
+                    language=lang,
+                    beam_size=5,
+                    vad_filter=True,
+                    word_timestamps=True,
+                )
+            except TypeError:
+                segments_iter, _ = model.transcribe(
+                    str(audio_path),
+                    language=lang,
+                    beam_size=5,
+                    vad_filter=True,
+                )
             segments: List[dict] = []
             for seg in segments_iter:
+                words_data: List[dict] = []
+                for word in getattr(seg, "words", []) or []:
+                    text = getattr(word, "word", "")
+                    if text is None:
+                        continue
+                    cleaned = text.strip()
+                    if not cleaned:
+                        continue
+                    start = float(getattr(word, "start", None) or seg.start or 0.0)
+                    end = float(getattr(word, "end", None) or start)
+                    words_data.append(
+                        {
+                            "start": start,
+                            "end": end if end > start else start,
+                            "text": cleaned,
+                        }
+                    )
                 segments.append(
                     {
                         "start": float(seg.start),
                         "end": float(seg.end),
                         "text": seg.text.strip(),
+                        "words": words_data,
                     }
                 )
             return segments
-        result = model.transcribe(
-            str(audio_path),
-            language=language if language != "auto" else None,
-            fp16=torch.cuda.is_available() and context.runtime_device == "cuda",
-            verbose=False,
-        )
-        return result.get("segments", []) or []
+        try:
+            result = model.transcribe(
+                str(audio_path),
+                language=language if language != "auto" else None,
+                fp16=torch.cuda.is_available() and context.runtime_device == "cuda",
+                verbose=False,
+                word_timestamps=True,
+            )
+        except TypeError:
+            result = model.transcribe(
+                str(audio_path),
+                language=language if language != "auto" else None,
+                fp16=torch.cuda.is_available() and context.runtime_device == "cuda",
+                verbose=False,
+            )
+        normalized: List[dict] = []
+        for seg in result.get("segments", []) or []:
+            start = float(seg.get("start", 0.0) or 0.0)
+            end = float(seg.get("end", start) or start)
+            words_data: List[dict] = []
+            for word in seg.get("words") or []:
+                w_text = (word.get("word") or "").strip()
+                if not w_text:
+                    continue
+                w_start = float(word.get("start", start) or start)
+                w_end = float(word.get("end", w_start) or w_start)
+                words_data.append(
+                    {
+                        "start": w_start,
+                        "end": w_end if w_end > w_start else w_start,
+                        "text": w_text,
+                    }
+                )
+            normalized.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "text": (seg.get("text") or "").strip(),
+                    "words": words_data,
+                }
+            )
+        return normalized
 
     # Отправляем сегменты в очередь локальной LLM-коррекции (или завершаем задачу сразу).
     def _dispatch_correction(self, task: TranscriptionTask, segments: Optional[List[dict]] = None):
@@ -1122,8 +1252,6 @@ class TranscriptionWorker(QThread):
         model: str,
         api_key: str,
         prompt_limit: int,
-        response_limit: int,
-        token_margin: int,
     ) -> LmStudioClient:
         settings = LmStudioSettings(
             base_url=base_url.rstrip("/"),
@@ -1131,9 +1259,9 @@ class TranscriptionWorker(QThread):
             api_key=api_key,
             timeout=120.0,
             temperature=0.1,
-            max_completion_tokens=response_limit or 4096,
+            max_completion_tokens=DEFAULT_LMSTUDIO_RESPONSE_TOKEN_LIMIT,
             max_prompt_tokens=prompt_limit or 8192,
-            prompt_token_margin=max(0, token_margin),
+            prompt_token_margin=DEFAULT_LMSTUDIO_TOKEN_MARGIN,
         )
         return LmStudioClient(settings)
 
@@ -1155,11 +1283,7 @@ class TranscriptionWorker(QThread):
             or self.settings.lmstudio_prompt_token_limit
             or 0
         )
-        token_margin = (
-            task.lmstudio_token_margin
-            or self.settings.lmstudio_token_margin
-            or 0
-        )
+        token_margin = DEFAULT_LMSTUDIO_TOKEN_MARGIN
         deep_mode = bool(getattr(task, "deep_correction", False) or getattr(self.settings, "deep_correction", False))
         prompt_mode = "deep" if deep_mode else "polish"
         if deep_mode:

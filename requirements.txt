@@ -30,3 +30,7 @@ nvidia-ml-py>=13.580.82
 nvidia-cuda-runtime-cu12>=12.4.127
 nvidia-cublas-cu12>=12.4.5
 nvidia-cudnn-cu12>=9.3.0
+
+# Transcript tooling helpers
+ijson>=3.2.0
+tiktoken>=0.7.0

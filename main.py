@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from app.config import AppConfig
+from app.config import AppConfig, DEFAULT_CONFIG_PATH
 
 
 def launch_gui(config_path: Path | None = None) -> int:
@@ -15,8 +15,7 @@ def launch_gui(config_path: Path | None = None) -> int:
     qt_args = [sys.argv[0]]
     app = QApplication(qt_args)
 
-    config_dir = Path.home() / ".video-transcriber"
-    target_config = config_path or (config_dir / "config.json")
+    target_config = config_path or DEFAULT_CONFIG_PATH
     config = AppConfig(target_config)
 
     splash = SplashScreen()

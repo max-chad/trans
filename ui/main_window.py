@@ -7,6 +7,7 @@ from PyQt6.QtGui import QDesktopServices
 
 from app.config import AppConfig
 from app.gpu_detection import GPUDetectionResult, detect_supported_nvidia_gpus
+from app.lmstudio_client import validate_lmstudio_settings
 from app.models import DeviceType, OutputRequest, ProcessingSettings, TranscriptionTask
 from app.translator import TranslationWorker, TranslationTask
 from app.worker import TranscriptionWorker
@@ -171,6 +172,21 @@ class MainWindow(QMainWindow):
             self.cpu_radio.setChecked(True)
             self.config.set("device", "cpu")
             self.log_message("warning", "GPU не обнаружен — работа будет выполнена на CPU.")
+
+    def _lmstudio_preflight(self, *, for_translation: bool = False) -> bool:
+        if not bool(self.config.get("lmstudio_enabled")):
+            return True
+        base_url = self.config.get("lmstudio_base_url") or ""
+        model = self.config.get("lmstudio_model") or ""
+        api_key = self.config.get("lmstudio_api_key") or ""
+        ok, reason = validate_lmstudio_settings(base_url, model, api_key)
+        if ok:
+            return True
+        scope = "translation" if for_translation else "correction"
+        message = f"{reason} {scope.capitalize()} will not start until the settings are fixed."
+        self.log_message("error", message)
+        QMessageBox.warning(self, "LM Studio configuration", message)
+        return False
 
     def _create_drop_area(self):
         drop_area = QLabel("Перетащите видео файлы сюда\nили нажмите для выбора")
@@ -352,39 +368,22 @@ class MainWindow(QMainWindow):
         self.lmstudio_prompt_tokens_spin.setValue(8192)
         self.lmstudio_prompt_tokens_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
         advanced_layout.addWidget(self.lmstudio_prompt_tokens_spin, 10, 1)
-
-        advanced_layout.addWidget(QLabel("LM Studio response token limit:"), 11, 0)
-        self.lmstudio_response_tokens_spin = QSpinBox()
-        self.lmstudio_response_tokens_spin.setRange(256, 16384)
-        self.lmstudio_response_tokens_spin.setSingleStep(256)
-        self.lmstudio_response_tokens_spin.setValue(4096)
-        self.lmstudio_response_tokens_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_response_tokens_spin, 11, 1)
-
-        advanced_layout.addWidget(QLabel("LM Studio token reserve:"), 12, 0)
-        self.lmstudio_token_margin_spin = QSpinBox()
-        self.lmstudio_token_margin_spin.setRange(0, 4096)
-        self.lmstudio_token_margin_spin.setSingleStep(64)
-        self.lmstudio_token_margin_spin.setValue(512)
-        self.lmstudio_token_margin_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_token_margin_spin, 12, 1)
-
-        advanced_layout.addWidget(QLabel("Таймаут загрузки LM Studio (сек):"), 13, 0)
+        advanced_layout.addWidget(QLabel("Таймаут загрузки LM Studio (сек):"), 11, 0)
         self.lmstudio_timeout_spin = QSpinBox()
         self.lmstudio_timeout_spin.setRange(60, 7200)
         self.lmstudio_timeout_spin.setSingleStep(30)
         self.lmstudio_timeout_spin.setValue(600)
         self.lmstudio_timeout_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_timeout_spin, 13, 1)
+        advanced_layout.addWidget(self.lmstudio_timeout_spin, 11, 1)
 
-        advanced_layout.addWidget(QLabel("Интервал опроса LM Studio (сек):"), 14, 0)
+        advanced_layout.addWidget(QLabel("Интервал опроса LM Studio (сек):"), 12, 0)
         self.lmstudio_poll_spin = QDoubleSpinBox()
         self.lmstudio_poll_spin.setRange(0.5, 15.0)
         self.lmstudio_poll_spin.setSingleStep(0.5)
         self.lmstudio_poll_spin.setValue(1.5)
         self.lmstudio_poll_spin.setDecimals(1)
         self.lmstudio_poll_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_poll_spin, 14, 1)
+        advanced_layout.addWidget(self.lmstudio_poll_spin, 12, 1)
 
         advanced_layout.setRowStretch(15, 1)
         self.settings_tabs.addTab(advanced_tab, "Дополнительно")
@@ -500,12 +499,6 @@ class MainWindow(QMainWindow):
         prompt_limit = int(self.config.get("lmstudio_prompt_token_limit") or 8192)
         prompt_limit = max(self.lmstudio_prompt_tokens_spin.minimum(), min(prompt_limit, self.lmstudio_prompt_tokens_spin.maximum()))
         self.lmstudio_prompt_tokens_spin.setValue(prompt_limit)
-        response_limit = int(self.config.get("lmstudio_response_token_limit") or 4096)
-        response_limit = max(self.lmstudio_response_tokens_spin.minimum(), min(response_limit, self.lmstudio_response_tokens_spin.maximum()))
-        self.lmstudio_response_tokens_spin.setValue(response_limit)
-        token_margin = int(self.config.get("lmstudio_token_margin") or 512)
-        token_margin = max(self.lmstudio_token_margin_spin.minimum(), min(token_margin, self.lmstudio_token_margin_spin.maximum()))
-        self.lmstudio_token_margin_spin.setValue(token_margin)
         timeout_val = int(self.config.get("lmstudio_load_timeout") or 600)
         timeout_val = max(self.lmstudio_timeout_spin.minimum(), min(timeout_val, self.lmstudio_timeout_spin.maximum()))
         self.lmstudio_timeout_spin.setValue(timeout_val)
@@ -550,6 +543,9 @@ class MainWindow(QMainWindow):
             self.post_action_combo.setCurrentIndex(0)
         self.post_notification_input.setText(self.config.get("post_processing_notification_text") or "")
         self._update_post_action_controls()
+        if self.config.load_warning:
+            self.log_message("warning", self.config.load_warning)
+            QMessageBox.warning(self, "Config warning", self.config.load_warning)
 
     def save_settings(self):
         if self.isMaximized():
@@ -599,8 +595,6 @@ class MainWindow(QMainWindow):
         self.config.set("llama_batch_size", self.correction_batch_spin.value())
         self.config.set("lmstudio_batch_size", self.lmstudio_batch_spin.value())
         self.config.set("lmstudio_prompt_token_limit", self.lmstudio_prompt_tokens_spin.value())
-        self.config.set("lmstudio_response_token_limit", self.lmstudio_response_tokens_spin.value())
-        self.config.set("lmstudio_token_margin", self.lmstudio_token_margin_spin.value())
         self.config.set("lmstudio_load_timeout", self.lmstudio_timeout_spin.value())
         self.config.set("lmstudio_poll_interval", float(self.lmstudio_poll_spin.value()))
         self.config.set("post_processing_action", self.post_action_combo.currentData())
@@ -650,6 +644,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Нет заданий", "Добавьте хотя бы один медиафайл для обработки.")
             return
         self.save_settings()
+        if bool(self.config.get("lmstudio_enabled")) and bool(self.config.get("use_local_llm_correction")):
+            if not self._lmstudio_preflight():
+                return
         self.process_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
 
@@ -660,8 +657,6 @@ class MainWindow(QMainWindow):
         )
         llama_batch_size = int(self.config.get("llama_batch_size") or correction_batch_size or 40)
         prompt_limit = int(self.config.get("lmstudio_prompt_token_limit") or 8192)
-        response_limit = int(self.config.get("lmstudio_response_token_limit") or 4096)
-        token_margin = int(self.config.get("lmstudio_token_margin") or 512)
         load_timeout = int(self.config.get("lmstudio_load_timeout") or 600)
         poll_interval = float(self.config.get("lmstudio_poll_interval") or 1.5)
         processing_settings = ProcessingSettings(
@@ -680,8 +675,6 @@ class MainWindow(QMainWindow):
             lmstudio_api_key=self.config.get("lmstudio_api_key") or "",
             lmstudio_batch_size=int(self.config.get("lmstudio_batch_size") or correction_batch_size),
             lmstudio_prompt_token_limit=prompt_limit,
-            lmstudio_response_token_limit=response_limit,
-            lmstudio_token_margin=token_margin,
             lmstudio_load_timeout=load_timeout,
             lmstudio_poll_interval=poll_interval,
         )
@@ -713,8 +706,6 @@ class MainWindow(QMainWindow):
                 task.lmstudio_api_key = self.config.get("lmstudio_api_key") or ""
                 task.lmstudio_batch_size = int(self.config.get("lmstudio_batch_size") or correction_batch_size)
                 task.lmstudio_prompt_token_limit = prompt_limit
-                task.lmstudio_response_token_limit = response_limit
-                task.lmstudio_token_margin = token_margin
                 task.lmstudio_load_timeout = load_timeout
                 task.lmstudio_poll_interval = poll_interval
                 task.pipeline_mode = processing_settings.pipeline_mode
@@ -778,11 +769,19 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Предупреждение", "Язык перевода совпадает с исходным.")
             return
         widget = self.task_widgets.get(task_id)
+        wants_lmstudio = bool(self.config.get("use_local_llm_translation")) and bool(self.config.get("lmstudio_enabled"))
+        if not wants_lmstudio:
+            self.log_message("warning", "Translation requires LM Studio. Enable it in settings.")
+            if widget:
+                widget.set_error("LM Studio is required for translation.")
+            return
+        if not self._lmstudio_preflight(for_translation=True):
+            if widget:
+                widget.set_error("Translation cancelled: fix LM Studio settings.")
+            return
         if widget:
             widget.set_status_translating()
         prompt_limit = int(self.config.get("lmstudio_prompt_token_limit") or 8192)
-        response_limit = int(self.config.get("lmstudio_response_token_limit") or 4096)
-        token_margin = int(self.config.get("lmstudio_token_margin") or 512)
         load_timeout = int(self.config.get("lmstudio_load_timeout") or 600)
         poll_interval = float(self.config.get("lmstudio_poll_interval") or 1.5)
         preferred = next((p for p in task.result_paths if p.suffix.lower() == ".srt"), task.result_paths[0])
@@ -797,8 +796,6 @@ class MainWindow(QMainWindow):
             lmstudio_api_key=self.config.get("lmstudio_api_key") or "",
             lmstudio_batch_size=int(self.config.get("lmstudio_batch_size") or self.config.get("correction_batch_size") or 40),
             lmstudio_prompt_token_limit=prompt_limit,
-            lmstudio_response_token_limit=response_limit,
-            lmstudio_token_margin=token_margin,
             lmstudio_load_timeout=load_timeout,
             lmstudio_poll_interval=poll_interval,
         )

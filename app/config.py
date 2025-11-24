@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 from typing import Any, Dict
+import hashlib
+import shutil
 
 LEGACY_KEY_MAP = {
     "use_g4f_correction": "use_local_llm_correction",
@@ -9,12 +11,49 @@ LEGACY_KEY_MAP = {
     "g4f_model": "local_llm_model_path",
 }
 
+CONFIG_ROOT_DIR = Path.home() / ".video-transcriber"
+LEGACY_CONFIG_PATH = CONFIG_ROOT_DIR / "config.json"
+_PROJECTS_SUBDIR = "projects"
+
+
+def _project_root() -> Path:
+    resolved = Path(__file__).resolve()
+    parents = resolved.parents
+    return parents[1] if len(parents) > 1 else resolved.parent
+
+
+def _sanitize_project_name(name: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name.lower()).strip("-")
+    return sanitized or "project"
+
+
+def _project_namespace() -> str:
+    root = _project_root()
+    digest = hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:8]
+    return f"{_sanitize_project_name(root.name)}-{digest}"
+
+
+def get_default_config_dir() -> Path:
+    env_override = os.getenv("VIDEO_TRANSCRIBER_CONFIG_DIR")
+    if env_override:
+        return Path(env_override).expanduser()
+    return CONFIG_ROOT_DIR / _PROJECTS_SUBDIR / _project_namespace()
+
+
+def get_default_config_path() -> Path:
+    return get_default_config_dir() / "config.json"
+
+
+DEFAULT_CONFIG_PATH = get_default_config_path()
+
 
 class AppConfig:
     """Менеджер настроек: отвечает за чтение, миграцию и сохранение конфигурации."""
 
     def __init__(self, config_path: Path):
         self.config_path = config_path
+        self.load_warning: str | None = None
+        self._maybe_migrate_legacy_config()
         self.defaults: Dict[str, Any] = {
             "output_dir": str(Path.home()),
             "device": "hybrid",
@@ -51,12 +90,39 @@ class AppConfig:
             "lmstudio_api_key": "",
             "lmstudio_batch_size": 40,
             "lmstudio_prompt_token_limit": 8192,
-            "lmstudio_response_token_limit": 4096,
-            "lmstudio_token_margin": 512,
             "lmstudio_load_timeout": 600,
             "lmstudio_poll_interval": 1.5,
         }
         self.settings = self.load_config()
+
+    def _maybe_migrate_legacy_config(self):
+        """Copy legacy shared config into the project-specific location once."""
+        if (
+            self.config_path == DEFAULT_CONFIG_PATH
+            and not self.config_path.exists()
+            and LEGACY_CONFIG_PATH.exists()
+        ):
+            try:
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(LEGACY_CONFIG_PATH, self.config_path)
+            except OSError:
+                pass
+
+    def _preserve_corrupt_config(self) -> Path | None:
+        """Keep a copy of the unreadable config so users can inspect what went wrong."""
+        if not self.config_path.exists():
+            return None
+        suffix = self.config_path.suffix or ".json"
+        backup = self.config_path.with_suffix(suffix + ".corrupt")
+        counter = 1
+        while backup.exists():
+            backup = self.config_path.with_suffix(f"{suffix}.corrupt{counter}")
+            counter += 1
+        try:
+            shutil.copy2(self.config_path, backup)
+            return backup
+        except OSError:
+            return None
 
     def _migrate_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         """Переименовывает устаревшие ключи и восстанавливает совместимость значений."""
@@ -91,6 +157,7 @@ class AppConfig:
 
     def load_config(self) -> Dict[str, Any]:
         """Загружает конфигурацию с диска, объединяя её с умолчаниями."""
+        self.load_warning = None
         if self.config_path.exists():
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
@@ -98,8 +165,13 @@ class AppConfig:
                 if isinstance(raw_settings, dict):
                     merged = {**self.defaults, **self._migrate_settings(raw_settings)}
                     return merged
-            except (json.JSONDecodeError, IOError):
-                pass
+                self.load_warning = f"Config at {self.config_path} is not a JSON object. Using defaults."
+            except (json.JSONDecodeError, IOError) as exc:
+                backup = self._preserve_corrupt_config()
+                note = f"Failed to parse config at {self.config_path}: {exc}. Using defaults."
+                if backup:
+                    note += f" Saved unreadable copy as {backup.name}."
+                self.load_warning = note
         return dict(self.defaults)
 
     def save_config(self):
@@ -140,8 +212,6 @@ class AppConfig:
             "correction_batch_size",
             "lmstudio_batch_size",
             "lmstudio_prompt_token_limit",
-            "lmstudio_response_token_limit",
-            "lmstudio_token_margin",
             "lmstudio_load_timeout",
             "window_width",
             "window_height",

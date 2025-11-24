@@ -1,15 +1,16 @@
 import argparse
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from .config import AppConfig
+from .config import AppConfig, DEFAULT_CONFIG_PATH
 from .models import OutputRequest, ProcessingSettings, TranscriptionTask
+from .lmstudio_client import validate_lmstudio_settings
 from .worker import TranscriptionWorker
-
-DEFAULT_CONFIG_PATH = Path.home() / ".video-transcriber" / "config.json"
-
+from .transcript_tool.cli import add_batch_arguments, build_batch_request
+from .transcript_tool.engine import TranscriptBatchProcessor
 
 def build_parser() -> argparse.ArgumentParser:
     """Construct the CLI entry point with subcommands and shared options."""
@@ -97,16 +98,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gui_parser.set_defaults(command="gui")
 
+    batch_parser = subparsers.add_parser(
+        "batch",
+        help="Run transcript batch analysis, rewrite, and story workflows.",
+    )
+    add_batch_arguments(batch_parser)
+    batch_parser.set_defaults(command="batch")
+
     return parser
 
 
 def run_cli(args: argparse.Namespace) -> int:
-    # The CLI currently exposes only the transcription workflow, so reject unknown commands early.
-    if args.command != "transcribe":
-        print("Неизвестная команда. Используйте 'gui' или 'transcribe'.", file=sys.stderr)
-        return 2
-    return _run_transcribe_command(args)
-
+    if args.command == "transcribe":
+        return _run_transcribe_command(args)
+    if args.command == "batch":
+        return _run_batch_command(args)
+    print("??????????? ???????. ??????????? 'gui', 'batch', ??? 'transcribe'.", file=sys.stderr)
+    return 2
 
 def _run_transcribe_command(args: argparse.Namespace) -> int:
     # Bridge worker callbacks to stdout/stderr while honouring the quiet flag.
@@ -148,6 +156,39 @@ def _run_transcribe_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_batch_command(args: argparse.Namespace) -> int:
+    config = _load_config(getattr(args, "config", None))
+    if config.load_warning:
+        print(f"[WARN] {config.load_warning}", file=sys.stderr)
+    try:
+        request = build_batch_request(args, config)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
+    processor = TranscriptBatchProcessor(request, log_callback=_batch_log)
+    report = processor.run()
+    summary = report.to_dict()["summary"]
+    print(
+        f"Processed {summary['processed']} file(s), failed {summary['failed']}. "
+        f"Reports saved to {request.output_dir}.",
+    )
+    print(f"Detailed log: {processor.log_path}")
+    return 0
+
+
+def _batch_log(level: str, message: str) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if level.lower() == "success":
+        prefix = "[OK]"
+    elif level.lower() == "warning":
+        prefix = "[WARN]"
+    elif level.lower() == "error":
+        prefix = "[ERR]"
+    else:
+        prefix = "[INFO]"
+    print(f"{prefix} [{timestamp}] {message}")
+
+
 def transcribe_file(
     input_path: Path,
     *,
@@ -175,6 +216,11 @@ def transcribe_file(
 
     # Persisted settings form the baseline before layering CLI overrides on top.
     config = _load_config(config_path)
+    if config.load_warning:
+        if log_callback is not None:
+            log_callback("warning", config.load_warning)
+        else:
+            print(f"[WARN] {config.load_warning}", file=sys.stderr)
     settings = _build_processing_settings(config)
 
     # Map explicit CLI flags for the LM Studio integration onto processing settings.
@@ -206,6 +252,15 @@ def transcribe_file(
         bool(config.get("use_local_llm_correction")) if use_correction is None else bool(use_correction)
     )
     resolved_formats = _resolve_formats(config, formats)
+
+    if settings.use_lmstudio and resolved_use_correction:
+        ok, reason = validate_lmstudio_settings(
+            settings.lmstudio_base_url,
+            settings.lmstudio_model,
+            settings.lmstudio_api_key,
+        )
+        if not ok:
+            raise ValueError(reason)
 
     # Determine whether plaintext transcripts should include timestamps.
     timestamps_flag = include_timestamps
@@ -242,8 +297,6 @@ def transcribe_file(
     task.lmstudio_api_key = settings.lmstudio_api_key
     task.lmstudio_batch_size = settings.lmstudio_batch_size
     task.lmstudio_prompt_token_limit = settings.lmstudio_prompt_token_limit
-    task.lmstudio_response_token_limit = settings.lmstudio_response_token_limit
-    task.lmstudio_token_margin = settings.lmstudio_token_margin
     task.lmstudio_load_timeout = settings.lmstudio_load_timeout
     task.lmstudio_poll_interval = settings.lmstudio_poll_interval
 
@@ -318,8 +371,6 @@ def _build_processing_settings(config: AppConfig) -> ProcessingSettings:
         lmstudio_api_key=str(config.get("lmstudio_api_key") or ""),
         lmstudio_batch_size=int(config.get("lmstudio_batch_size") or 40),
         lmstudio_prompt_token_limit=int(config.get("lmstudio_prompt_token_limit") or 8192),
-        lmstudio_response_token_limit=int(config.get("lmstudio_response_token_limit") or 4096),
-        lmstudio_token_margin=int(config.get("lmstudio_token_margin") or 512),
         lmstudio_load_timeout=float(config.get("lmstudio_load_timeout") or 600),
         lmstudio_poll_interval=float(config.get("lmstudio_poll_interval") or 1.5),
     )

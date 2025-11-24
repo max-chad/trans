@@ -177,38 +177,36 @@ def test_lmstudio_request_model_load_uses_preset():
     settings = LmStudioSettings(base_url="http://localhost:12345", model="stub")
     client = LmStudioClient(settings)
 
-    calls = []
+    calls: List[dict] = []
 
     class DummyResponse:
         def __init__(self, status: int = 200):
             self.status_code = status
+            self.text = ""
 
-    def fake_post(url, json, timeout):
-        calls.append((url, json))
-        return DummyResponse()
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
 
-    client.session.post = fake_post  # type: ignore[attr-defined]
+    class DummySession:
+        def post(self, url, json=None, headers=None, timeout=None):
+            calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+            return DummyResponse()
 
-    state = {"checks": 0}
-
-    def fake_find():
-        state["checks"] += 1
-        if state["checks"] <= 1:
-            return {"status": "loading"}
-        return {"status": "ready"}
-
-    client._find_model_entry = fake_find  # type: ignore[assignment]
+    client.session = DummySession()  # type: ignore[assignment]
 
     original_sleep = lmstudio_module.time.sleep
     try:
         lmstudio_module.time.sleep = lambda _: None
-        client.ensure_model_loaded(timeout=0.1, poll_interval=0.01)
+        client.ensure_model_loaded(lambda *_: None, timeout=0.1, poll_interval=0.01)
     finally:
         lmstudio_module.time.sleep = original_sleep
 
     assert calls, "Model load request not issued"
-    preset_values = [payload.get("presetId") for _, payload in calls]
-    assert all(value == "1" for value in preset_values), f"Expected preset '1', got {preset_values}"
+    payload = calls[0]["json"]
+    headers = calls[0].get("headers") or {}
+    assert payload.get("presetId") == "1", f"Expected preset '1', got {payload}"
+    assert payload.get("model") == settings.model, f"Model missing from payload: {payload}"
+    assert headers.get("X-LLM-Preset-ID") == "1", f"Preset header missing in {headers}"
     print("OK test_lmstudio_request_model_load_uses_preset")
 
 

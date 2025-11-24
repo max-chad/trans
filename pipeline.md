@@ -4,15 +4,18 @@
 
 ## Архитектура и ключевые компоненты
 - **PyQt6-приложение**: общий стек для GUI и CLI. Даже в консольном режиме создаётся `QCoreApplication`, потому что тяжелые операции выполняются в потоке `TranscriptionWorker`, наследнике `QThread`.
-- **Конфигурация** (`app/config.py`): класс `AppConfig` читает и сохраняет JSON-файл настроек (`~/.video-transcriber/config.json`). Включает миграции (`LEGACY_KEY_MAP`), значения по умолчанию и автоматическое сохранение при изменении.
+- **Конфигурация** (`app/config.py`): класс `AppConfig` читает и сохраняет JSON-файл настроек (`~/.video-transcriber/projects/<project-id>/config.json`). Включает миграции (`LEGACY_KEY_MAP`), значения по умолчанию и автоматическое сохранение при изменении.
+  (<project-id> is derived from the project folder name plus a short SHA1 hash so each clone keeps its own config.)
 - **Транскрипционный движок** (`app/worker.py`): класс `TranscriptionWorker` управляет очередью задач, загрузкой моделей Whisper, извлечением аудио, пост-обработкой, записью результата и выстраивает конвейер коррекции с LM Studio.
 - **Клиент LM Studio** (`app/lmstudio_client.py`): низкоуровневый HTTP-клиент, работающий с REST-совместимым API LM Studio. Умеет подбирать рабочий endpoint, загружать модель, переписывать и переводить батчи строк, учитывая лимиты токенов.
 - **CLI-обёртка** (`app/cli.py`): парсер аргументов и удобный вызов `TranscriptionWorker` для одиночных задач без запуска GUI.
 - **GUI** (`ui/main_window.py`): визуальный интерфейс, подключающийся к тем же воркерам (`TranscriptionWorker`, `TranslationWorker`) и управляющий настройками.
 - **Перевод субтитров** (`app/translator.py`): отдельный поток `TranslationWorker` для пакетного перевода готовых файлов (.srt, .txt) через LM Studio.
+- **Batch-инструменты** (`app/transcript_tool/*` и команда `batch`): `TranscriptBatchProcessor` находит `.srt`, `.txt` и Telegram-json, запускает аналитические/переписывающие/исторические проходы через LM Studio и складывает артефакты (`analysis/`, `rewrites/`, `stories/`, `reports/`, журналы) в `transcript_tool_output/`.
 
 ## Конфигурация и загрузка
-1. **Путь к конфигурации**: по умолчанию `~/.video-transcriber/config.json`. CLI позволяет передать альтернативный путь через `--config`.
+1. **Путь к конфигурации**: по умолчанию `~/.video-transcriber/projects/<project-id>/config.json`. CLI позволяет передать альтернативный путь через `--config`.
+  (Override with --config or the VIDEO_TRANSCRIBER_CONFIG_DIR environment variable.)
 2. **Загрузка**: `AppConfig.load_config()` читает JSON, объединяет с `defaults`. Ошибочные или отсутствующие файлы заменяются копией defaults.
 3. **Сохранение**: `AppConfig.set()` обновляет значение ключа и сразу сохраняет файл. Папка создаётся рекурсивно.
 4. **Поддержка наследия**: `_migrate_settings` переносит устаревшие ключи (g4f → local_llm_*), нормализует формат выходных файлов, форсирует `whisper_backend=faster`.

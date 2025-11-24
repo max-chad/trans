@@ -6,7 +6,8 @@ from typing import Optional
 from PyQt6.QtCore import QThread, pyqtSignal
 import srt
 
-from .lmstudio_client import LmStudioClient, LmStudioError, LmStudioSettings, chunked
+from .constants import DEFAULT_LMSTUDIO_RESPONSE_TOKEN_LIMIT, DEFAULT_LMSTUDIO_TOKEN_MARGIN
+from .lmstudio_client import LmStudioClient, LmStudioError, LmStudioSettings, chunked, validate_lmstudio_settings
 
 
 @dataclass
@@ -21,8 +22,6 @@ class TranslationTask:
     lmstudio_api_key: str = ""
     lmstudio_batch_size: int = 40
     lmstudio_prompt_token_limit: int = 8192
-    lmstudio_response_token_limit: int = 4096
-    lmstudio_token_margin: int = 512
     lmstudio_load_timeout: float = 600.0
     lmstudio_poll_interval: float = 1.5
 
@@ -43,17 +42,18 @@ class TranslationWorker(QThread):
     def _build_client(self, task: TranslationTask) -> LmStudioClient:
         base_url = (task.lmstudio_base_url or "").strip()
         model = (task.lmstudio_model or "").strip()
-        if not base_url or not model:
-            raise ValueError("LM Studio settings are incomplete.")
+        ok, reason = validate_lmstudio_settings(base_url, model, task.lmstudio_api_key)
+        if not ok:
+            raise ValueError(reason)
         settings = LmStudioSettings(
             base_url=base_url,
             model=model,
             api_key=task.lmstudio_api_key or "",
             timeout=120.0,
             temperature=0.2,
-            max_completion_tokens=task.lmstudio_response_token_limit or 4096,
+            max_completion_tokens=DEFAULT_LMSTUDIO_RESPONSE_TOKEN_LIMIT,
             max_prompt_tokens=task.lmstudio_prompt_token_limit or 8192,
-            prompt_token_margin=max(0, task.lmstudio_token_margin),
+            prompt_token_margin=DEFAULT_LMSTUDIO_TOKEN_MARGIN,
         )
         return LmStudioClient(settings)
 
@@ -68,7 +68,7 @@ class TranslationWorker(QThread):
         translated: list[str] = []
         batch_size = max(1, task.lmstudio_batch_size)
         prompt_limit = max(0, task.lmstudio_prompt_token_limit)
-        token_margin = max(0, task.lmstudio_token_margin)
+        token_margin = DEFAULT_LMSTUDIO_TOKEN_MARGIN
         for chunk in chunked(texts, batch_size, max_tokens=prompt_limit, token_margin=token_margin):
             translated.extend(
                 client.translate_batch(chunk, task.target_lang, task.source_lang)
@@ -94,7 +94,7 @@ class TranslationWorker(QThread):
         batch_size = max(1, task.lmstudio_batch_size)
         translated: list[str] = []
         prompt_limit = max(0, task.lmstudio_prompt_token_limit)
-        token_margin = max(0, task.lmstudio_token_margin)
+        token_margin = DEFAULT_LMSTUDIO_TOKEN_MARGIN
         for chunk in chunked(lines, batch_size, max_tokens=prompt_limit, token_margin=token_margin):
             translated.extend(
                 client.translate_batch(chunk, task.target_lang, task.source_lang)

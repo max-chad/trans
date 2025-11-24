@@ -1,195 +1,169 @@
+from __future__ import annotations
+
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 import requests
-from requests import Response
+from requests import Response, Session
+from requests.exceptions import RequestException
 
-# Logger keeps module-level diagnostics consistent with rest of app.
+from app import token_utils
+
 logger = logging.getLogger(__name__)
 
-# System prompts define behavior for different subtitle workflows.
-REWRITE_SYSTEM_PROMPT = (
-    "You are an expert subtitle editor. Clean up grammar, spelling, and punctuation without changing meaning, tone, slang, or line breaks. "
-    "Return exactly the same number of lines in the same order. Do not merge or split lines, add numbering, or include explanations."
-)
-
-REWRITE_DEEP_SYSTEM_PROMPT = (
-    "You are a professional dialogue editor. Rephrase colloquial or fragmented speech into clear, natural sentences while preserving intent and key facts. "
-    "Feel free to expand shorthand, clarify implied words, and smooth over filler phrases. Keep the number of lines and their order unchanged."
-)
-
+_LINE_NUMBER_RE = re.compile(r"^\s*(?:\d+[).:-]|\-\s+)\s*")
 TRANSLATE_SYSTEM_PROMPT = (
     "You are a professional audiovisual translator. Translate the text while preserving context, tone, and approximate pacing. "
     "Return the same number of lines as the input, plain text only, without extra commentary."
 )
 
-# Regex strips common numbering prefixes that models might add.
-_LINE_NUMBER_RE = re.compile(r"^\s*(?:\d+[\).:-]|\-\s+)\s*")
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    """Minimal metadata needed to decide whether a model exposes reasoning controls."""
+
+    model_id: Optional[str]
+    supported_parameters: Tuple[str, ...]
+    supports_reasoning: bool
+    reasoning_levels: Tuple[str, ...]
 
 
 class LmStudioError(RuntimeError):
-    """Raised when LM Studio request fails."""
+    """Raised when LM Studio returns an error or cannot be reached."""
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
-@dataclass
+_DEFAULT_REASONING_LEVELS = ("low", "medium", "high")
+REASONING_DEFAULT_SELECTION = "default"
+
+@dataclass(slots=True)
 class LmStudioSettings:
     base_url: str
     model: str
     api_key: str = ""
-    timeout: float = 60.0
-    temperature: float = 0.1
-    max_completion_tokens: int = 4096
-    max_prompt_tokens: int = 8192
-    prompt_token_margin: int = 512
+    timeout: float = 120.0
+    max_completion_tokens: Optional[int] = None
+    max_prompt_tokens: Optional[int] = None
     preset_id: str = "1"
+    temperature: float = 0.2
+    top_p: float = 0.9
+    prompt_token_margin: int = 0
+    provider_preferences: Optional[Dict[str, Any]] = None
+    reasoning_effort: Optional[str] = None
 
 
 class LmStudioClient:
-    def __init__(self, settings: LmStudioSettings):
-        # Validate required settings eagerly so callers get immediate feedback.
+    def __init__(self, settings: LmStudioSettings, session: Optional[Session] = None):
         if not settings.base_url:
-            raise ValueError("LM Studio base URL is empty.")
+            raise ValueError("LM Studio base URL is required.")
         if not settings.model:
-            raise ValueError("LM Studio model is not specified.")
+            raise ValueError("LM Studio model is required.")
         self.settings = settings
-        # Keep a dedicated session to reuse connections and shared headers.
-        self.session = requests.Session()
-        self.session.headers.update({"Content-Type": "application/json"})
-        if settings.api_key:
-            self.session.headers.update({"Authorization": f"Bearer {settings.api_key}"})
-        raw_root = settings.base_url.rstrip("/")
-        preferred_roots: List[str] = []
-        if raw_root:
-            if raw_root.endswith("/v1"):
-                preferred_roots.append(raw_root)
-                preferred_roots.append(raw_root[: -len("/v1")])
-            else:
-                preferred_roots.append(raw_root + "/v1")
-                preferred_roots.append(raw_root)
-        self._api_roots: List[str] = []
-        for root in preferred_roots:
-            normalized = root.rstrip("/")
-            if normalized and normalized not in self._api_roots:
-                self._api_roots.append(normalized)
-        if not self._api_roots:
-            raise ValueError("LM Studio base URL is invalid.")
-        # Track variants of each REST endpoint so we can fall back between LM Studio versions.
-        self._chat_endpoints = [root + "/chat/completions" for root in self._api_roots]
-        self._model_endpoints = [root + "/models" for root in self._api_roots]
-        self._load_endpoints = []
-        for root in self._api_roots:
-            self._load_endpoints.extend(
-                [
-                    root + "/models",
-                    root + "/models/load",
-                    root + "/internal/model/load",
-                ]
-            )
-        # Cache working and failing endpoints so we can avoid redundant retries.
-        self._active_chat_endpoint: Optional[str] = None
-        self._invalid_chat_endpoints: set[str] = set()
-        self._invalid_model_endpoints: set[str] = set()
+        self._session = session or requests.Session()
+        self._max_attempts = 3
 
-    def _post(self, payload: dict) -> Response:
-        # Prioritize the most recent working endpoint, then fall back to others.
-        candidates = []
-        if self._active_chat_endpoint:
-            candidates.append(self._active_chat_endpoint)
-        candidates.extend(
-            ep for ep in self._chat_endpoints if ep not in candidates and ep not in self._invalid_chat_endpoints
-        )
-        last_error: Optional[Exception] = None
-        for endpoint in candidates:
+    @property
+    def session(self) -> Session:
+        return self._session
+
+    @session.setter
+    def session(self, value: Session) -> None:
+        self._session = value
+
+    def ensure_model_loaded(
+        self,
+        log_callback: Callable[[str, str], None],
+        timeout: float = 600.0,
+        interval: Optional[float] = None,
+        *,
+        poll_interval: Optional[float] = None,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        log_callback("info", f"Ensuring LM Studio model '{self.settings.model}' is loaded.")
+        ping_payload = {
+            "model": self.settings.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+        if self.settings.preset_id:
+            ping_payload["presetId"] = str(self.settings.preset_id)
+        ping_payload = self._apply_provider_preferences(ping_payload)
+        sleep_interval = poll_interval if poll_interval is not None else interval if interval is not None else 5.0
+        while True:
             try:
-                response = self.session.post(
-                    endpoint,
-                    json=payload,
-                    timeout=self.settings.timeout,
-                )
-                response.raise_for_status()
-                data = None
-                try:
-                    data = response.json()
-                except ValueError:
-                    data = None
-                if isinstance(data, dict) and "error" in data:
-                    # Some endpoints reply with 200 but include an error payload; mark them as unusable.
-                    self._invalid_chat_endpoints.add(endpoint)
-                    last_error = LmStudioError(data.get("error") or "LM Studio returned error response.")
-                    continue
-                # Remember the successful endpoint to optimize subsequent calls.
-                self._active_chat_endpoint = endpoint
-                return response
-            except requests.RequestException as exc:
-                last_error = exc
-                continue
-        if last_error is None:
-            raise LmStudioError("LM Studio chat endpoint is not configured.")
-        raise LmStudioError(f"LM Studio request failed: {last_error}") from last_error
+                self._post("chat/completions", ping_payload)
+                log_callback("success", "LM Studio is ready.")
+                return
+            except LmStudioError as exc:
+                if not getattr(exc, "retryable", True):
+                    log_callback("error", f"LM Studio returned a fatal error: {exc}")
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                log_callback("warning", f"LM Studio not ready: {exc}. Retrying...")
+                time.sleep(sleep_interval)
 
-    def chat_completion(self, messages: List[dict], max_tokens: Optional[int] = None) -> str:
-        # Compose a chat completion request while honoring optional token limits.
-        budget = max_tokens if max_tokens is not None else self.settings.max_completion_tokens
+    def chat_completion(self, messages: Sequence[dict], max_tokens: Optional[int] = None) -> str:
         payload = {
             "model": self.settings.model,
-            "messages": messages,
+            "messages": list(messages),
             "temperature": self.settings.temperature,
-            "stream": False,
+            "top_p": self.settings.top_p,
         }
-        if budget and budget > 0:
-            payload["max_tokens"] = int(budget)
-        response = self._post(payload)
-        try:
-            data = response.json()
-        except ValueError as exc:  # pragma: no cover - invalid json
-            raise LmStudioError(f"Invalid LM Studio response: {response.text[:200]}") from exc
+        requested_limit = max_tokens if (max_tokens or 0) > 0 else self.settings.max_completion_tokens
+        if requested_limit and requested_limit > 0:
+            if (
+                max_tokens
+                and self.settings.max_completion_tokens
+                and self.settings.max_completion_tokens > 0
+            ):
+                requested_limit = min(requested_limit, self.settings.max_completion_tokens)
+            payload["max_tokens"] = int(requested_limit)
+        payload = self._apply_reasoning_config(payload)
+        payload = self._apply_provider_preferences(payload)
+        data = self._post("chat/completions", payload)
         try:
             choice = data["choices"][0]
             content = choice["message"]["content"]
-            return str(content).strip()
+            return content.strip()
         except (KeyError, IndexError, TypeError) as exc:
-            # LM Studio occasionally responds with partial data; surface that upstream.
-            raise LmStudioError(f"Incomplete LM Studio response: {data}") from exc
+            raise LmStudioError(f"Unexpected response format: {data}") from exc
 
-    def rewrite_batch(self, lines: List[str], lang_hint: str = "", mode: str = "polish") -> List[str]:
-        if not lines:
-            return []
-        # Pick the rewrite style and instruction set based on caller hints.
-        system_prompt = REWRITE_SYSTEM_PROMPT
-        description = (
-            f"Rewrite the following {len(lines)} subtitle lines without changing their order. "
-            "Keep abbreviations and slang if present."
+    def rewrite_batch(self, lines: Sequence[str], language_hint: str, mode: str) -> List[str]:
+        instruction = _mode_instruction(mode)
+        system_prompt = (
+            "You are a professional subtitle editor. Rewrite each line individually and preserve the order. "
+            "Return a JSON array of strings with the same length as the input."
         )
-        if mode.lower() == "deep":
-            system_prompt = REWRITE_DEEP_SYSTEM_PROMPT
-            description = (
-                f"Rewrite the following {len(lines)} subtitle lines into polished narrative sentences. "
-                "You may paraphrase heavily, clarify implied context, and expand casual speech while keeping the same number of lines."
-            )
-        if lang_hint:
-            system_prompt += f" Source language hint: {lang_hint}."
-        # Flatten multi-line entries so we keep the input shape for validation later.
-        normalized = [line.replace("\n", " ").strip() for line in lines]
-        messages = [
-            {
-                "role": "user",
-                "content": _compose_user_prompt(system_prompt, description, normalized),
-            }
-        ]
-        completion_budget = _completion_budget(normalized, self.settings.max_completion_tokens)
-        raw = self.chat_completion(messages, max_tokens=completion_budget)
-        parsed = _split_lines(raw, len(lines))
-        if parsed is None:
-            logger.warning(
-                "LM Studio rewrite returned %s lines instead of %s. Keeping originals.",
-                len([l for l in raw.splitlines() if l.strip()]),
-                len(lines),
-            )
-            return lines
-        return parsed
+        user_payload = {
+            "language_hint": language_hint or "auto",
+            "mode": instruction,
+            "lines": list(lines),
+        }
+        response = self.chat_completion(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            max_tokens=self.settings.max_completion_tokens,
+        )
+        try:
+            parsed = json.loads(response)
+            if isinstance(parsed, list):
+                normalized = [str(item).strip() for item in parsed]
+                return _align_lines(normalized, len(lines), list(lines))
+        except json.JSONDecodeError:
+            pass
+        fallback = [line.strip() for line in response.splitlines() if line.strip()]
+        return _align_lines(fallback, len(lines), list(lines))
 
     def translate_batch(
         self,
@@ -199,7 +173,6 @@ class LmStudioClient:
     ) -> List[str]:
         if not lines:
             return []
-        # Prepare translation instructions and normalize whitespace for better model input.
         normalized = [line.replace("\n", " ").strip() for line in lines]
         description = (
             f"Translate the following {len(normalized)} subtitle lines into {target_lang}. "
@@ -225,122 +198,468 @@ class LmStudioClient:
             return lines
         return parsed
 
-    def ensure_model_loaded(
-        self,
-        log_callback: Optional[Callable[[str, str], None]] = None,
-        timeout: float = 120.0,
-        poll_interval: float = 1.5,
-    ) -> None:
-        """Ensure target model is loaded in LM Studio, requesting load if needed."""
-        # Wrap logging so callers can surface status updates in their own UI.
-        def _log(level: str, message: str) -> None:
-            if log_callback:
-                try:
-                    log_callback(level, message)
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("Failed to emit LM Studio log callback.")
-
-        # Check whether the target is already active before touching the REST API.
-        entry = self._find_model_entry()
-        if self._is_model_ready(entry):
-            return
-
-        _log("info", f"Загрузка модели LM Studio: {self.settings.model}")
-        if not self._request_model_load():
-            raise LmStudioError("Не удалось инициировать загрузку модели в LM Studio.")
-
-        # Poll until the service reports the model as ready or the timeout expires.
-        deadline = time.time() + max(5.0, timeout)
-        while time.time() < deadline:
-            time.sleep(max(0.5, poll_interval))
-            entry = self._find_model_entry()
-            if self._is_model_ready(entry):
-                _log("success", f"Модель LM Studio готова: {self.settings.model}")
-                return
-        raise LmStudioError("LM Studio не загрузила модель в отведённое время.")
-
-    def _request_model_load(self) -> bool:
-        preset = str(self.settings.preset_id).strip() if self.settings.preset_id is not None else ""
-        if not preset:
-            preset = "1"
-        payload = {"model": self.settings.model, "presetId": preset}
-        # Try each known load endpoint variant until one accepts the request.
-        for endpoint in self._load_endpoints:
+    def _post(self, path: str, payload: dict) -> dict:
+        url = self._url(path)
+        attempt = 1
+        last_error: Optional[LmStudioError] = None
+        while attempt <= self._max_attempts:
             try:
-                response = self.session.post(endpoint, json=payload, timeout=self.settings.timeout)
-            except requests.RequestException:
+                request_timeout = self.settings.timeout if self.settings.timeout is not None else 120.0
+                response: Response = self._session.post(
+                    url, json=payload, headers=self._headers(), timeout=request_timeout
+                )
+            except RequestException as exc:
+                retryable = self._should_retry(attempt)
+                error = LmStudioError(f"Failed to reach LM Studio: {exc}", retryable=retryable)
+                if not retryable:
+                    raise error from exc
+                last_error = error
+                self._sleep(self._retry_delay(attempt))
+                attempt += 1
                 continue
-            if response.status_code in (200, 201, 202, 204):
-                return True
-            if response.status_code == 409:
-                # Already loading/loaded
-                return True
-        return False
 
-    def _find_model_entry(self) -> Optional[dict]:
-        # Query each metadata endpoint and normalize the many response shapes LM Studio returns.
-        for endpoint in self._model_endpoints:
-            if endpoint in self._invalid_model_endpoints:
+            if response.status_code >= 400:
+                retryable = self._should_retry(attempt, response.status_code)
+                error = LmStudioError(
+                    f"LM Studio error {response.status_code}: {self._clip_text(response.text)}",
+                    retryable=retryable,
+                )
+                if not retryable:
+                    raise error
+                last_error = error
+                self._sleep(self._retry_delay(attempt))
+                attempt += 1
                 continue
-            try:
-                response = self.session.get(endpoint, timeout=self.settings.timeout)
-                response.raise_for_status()
-            except requests.RequestException:
-                continue
+
             try:
                 data = response.json()
             except ValueError:
+                fallback = self._extract_json_payload(response.text)
+                if fallback is not None:
+                    data = fallback
+                else:
+                    retryable = self._should_retry(attempt)
+                    error = LmStudioError(
+                        f"Invalid JSON response from LM Studio: {self._clip_text(response.text)}",
+                        retryable=retryable,
+                    )
+                    if not retryable:
+                        raise error
+                    last_error = error
+                    self._sleep(self._retry_delay(attempt))
+                    attempt += 1
+                    continue
+
+            provider_error = self._provider_error_payload(data)
+            if provider_error:
+                message, code = provider_error
+                retryable = self._should_retry(attempt, code)
+                error = LmStudioError(message, retryable=retryable)
+                if not retryable:
+                    raise error
+                last_error = error
+                self._sleep(self._retry_delay(attempt))
+                attempt += 1
                 continue
-            if isinstance(data, dict) and "error" in data:
-                # LM Studio returns 200 with error payload for unsupported endpoints. Skip them.
-                self._invalid_model_endpoints.add(endpoint)
-                continue
-            entries: List[dict] = []
-            if isinstance(data, dict):
-                if isinstance(data.get("data"), list):
-                    entries = [item for item in data["data"] if isinstance(item, dict)]
-                elif isinstance(data.get("models"), list):
-                    entries = [item for item in data["models"] if isinstance(item, dict)]
-            elif isinstance(data, list):
-                entries = [item for item in data if isinstance(item, dict)]
-            target = self.settings.model.lower()
-            for entry in entries:
-                identifier = str(entry.get("id") or entry.get("model") or "").lower()
-                if identifier == target:
-                    return entry
-        return None
+
+            return data
+        if last_error:
+            raise last_error
+        raise LmStudioError("LM Studio request failed.")
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.settings.api_key:
+            headers["Authorization"] = f"Bearer {self.settings.api_key}"
+        if self.settings.preset_id:
+            headers["X-LLM-Preset-ID"] = str(self.settings.preset_id)
+        return headers
+
+    def _url(self, path: str) -> str:
+        base = self.settings.base_url.rstrip("/")
+        return f"{base}/{path.lstrip('/')}"
 
     @staticmethod
-    def _is_model_ready(entry: Optional[dict]) -> bool:
-        # LM Studio uses multiple flags across builds; accept any that imply readiness.
-        if not entry:
+    def _models_endpoint(base_url: str) -> str:
+        base = base_url.rstrip("/")
+        return f"{base}/models"
+
+    @staticmethod
+    def _matches_entry(entry: Dict[str, Any], normalized_target: str) -> bool:
+        for key in ("id", "model", "canonical_slug", "model_id", "slug", "name"):
+            candidate = entry.get(key)
+            if isinstance(candidate, str) and candidate.strip().lower() == normalized_target:
+                return True
+        return False
+
+    @staticmethod
+    def fetch_model_capabilities(
+        base_url: str,
+        *,
+        model: str | None = None,
+        api_key: str = "",
+        preset_id: Optional[str] = None,
+        session: Optional[Session] = None,
+        timeout: float = 20.0,
+    ) -> ModelCapabilities:
+        url = LmStudioClient._models_endpoint(base_url)
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        if preset_id:
+            headers["X-LLM-Preset-ID"] = str(preset_id)
+        params = {"model": model} if model else None
+        session = session or requests.Session()
+        response = session.get(url, headers=headers, params=params, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        entries = None
+        if isinstance(data, dict):
+            entries = data.get("data")
+            if entries is None:
+                entries = data.get("models")
+        if entries is None:
+            if isinstance(data, list):
+                entries = data
+            else:
+                entries = [data]
+        if isinstance(entries, dict):
+            entries = [entries]
+        normalized_target = (model or "").strip().lower()
+        chosen: Optional[Dict[str, Any]] = None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if normalized_target and LmStudioClient._matches_entry(entry, normalized_target):
+                chosen = entry
+                break
+            if chosen is None:
+                chosen = entry
+        supported_params: Tuple[str, ...] = ()
+        if chosen:
+            raw_params = chosen.get("supported_parameters") or []
+            if isinstance(raw_params, list):
+                supported_params = tuple(
+                    param.strip().lower()
+                    for param in raw_params
+                    if isinstance(param, str) and param.strip()
+                )
+        supports_reasoning = "reasoning" in supported_params
+        reasoning_levels = _DEFAULT_REASONING_LEVELS
+        if chosen:
+            candidate_levels = chosen.get("reasoning_levels") or chosen.get("reasoning_effort_levels")
+            if isinstance(candidate_levels, (list, tuple)):
+                normalized_levels = tuple(
+                    level.strip().lower()
+                    for level in candidate_levels
+                    if isinstance(level, str) and level.strip()
+                )
+                if normalized_levels:
+                    reasoning_levels = normalized_levels
+        model_id = None
+        if chosen:
+            candidate_id = chosen.get("id") or chosen.get("canonical_slug") or chosen.get("model")
+            if isinstance(candidate_id, str):
+                model_id = candidate_id.strip()
+        return ModelCapabilities(
+            model_id=model_id,
+            supported_parameters=supported_params,
+            supports_reasoning=supports_reasoning,
+            reasoning_levels=reasoning_levels,
+        )
+
+    @staticmethod
+    def _clip_text(text: str, limit: int = 800) -> str:
+        snippet = (text or "").strip()
+        if not snippet:
+            return "<empty response>"
+        if len(snippet) <= limit:
+            return snippet
+        return f"{snippet[:limit]}…"
+
+    @staticmethod
+    def _retry_delay(attempt: int) -> float:
+        return min(5.0, 0.5 * attempt)
+
+    def _should_retry(self, attempt: int, status_code: Optional[int] = None) -> bool:
+        if attempt >= self._max_attempts:
             return False
-        status = str(entry.get("status") or entry.get("state") or "").lower()
-        if status in {"ready", "loaded", "active", "online"}:
+        if status_code is None:
             return True
-        if entry.get("ready") is True or entry.get("loaded") is True:
+        retryable = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524}
+        if status_code in retryable:
             return True
-        if entry.get("isLoaded") is True or entry.get("loadedOnGPU") is True:
-            return True
-        inference = entry.get("inferenceStatus") or entry.get("inference_status")
-        if isinstance(inference, str) and inference.lower() in {"ready", "active"}:
-            return True
-        # Some LM Studio endpoints return minimal metadata without status field.
-        # If we see the model entry at all and no explicit "loading" indicator, assume ready.
-        if status == "" and inference in (None, ""):
+        if 500 <= status_code < 600:
             return True
         return False
 
+    def _sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+    @staticmethod
+    def _extract_json_payload(body: str) -> Optional[dict]:
+        stripped = (body or "").strip()
+        if not stripped:
+            return None
+        for candidate in LmStudioClient._json_candidates(stripped):
+            try:
+                loaded = json.loads(candidate)
+            except ValueError:
+                continue
+            if isinstance(loaded, dict):
+                return loaded
+        sse_payload = LmStudioClient._parse_sse_chunks(stripped)
+        if sse_payload:
+            return sse_payload
+        return None
+
+    @staticmethod
+    def _json_candidates(body: str) -> Iterator[str]:
+        yield body
+        if body.startswith("```"):
+            inner = "\n".join(
+                line for line in body.splitlines() if not line.strip().startswith("```")
+            ).strip()
+            if inner:
+                yield inner
+        first = body.find("{")
+        last = body.rfind("}")
+        if 0 <= first < last:
+            yield body[first : last + 1]
+
+    @staticmethod
+    def _parse_sse_chunks(body: str) -> Optional[dict]:
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        if not any(line.startswith("data:") for line in lines):
+            return None
+        content_parts: List[str] = []
+        finish_reason: Optional[str] = None
+        role: Optional[str] = None
+        for line in lines:
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except ValueError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            text_piece = delta.get("content")
+            if text_piece:
+                content_parts.append(text_piece)
+            if not role and isinstance(delta.get("role"), str):
+                role = delta["role"]
+            finish_reason = choice.get("finish_reason") or finish_reason
+        if not content_parts:
+            return None
+        content = "".join(content_parts)
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": role or "assistant", "content": content},
+                    "finish_reason": finish_reason,
+                }
+            ]
+        }
+
+    @staticmethod
+    def _provider_error_payload(payload: object) -> Optional[tuple[str, Optional[int]]]:
+        if not isinstance(payload, dict):
+            return None
+        error_block = payload.get("error")
+        if not isinstance(error_block, dict):
+            return None
+        message = str(error_block.get("message") or "Unknown LM Studio error")
+        metadata = error_block.get("metadata")
+        details: list[str] = []
+        if isinstance(metadata, dict):
+            raw = metadata.get("raw")
+            provider = metadata.get("provider_name")
+            if provider:
+                details.append(f"provider={provider}")
+            if raw:
+                details.append(raw)
+        if details:
+            message = f"{message} ({'; '.join(details)})"
+        code_raw = error_block.get("code")
+        code: Optional[int] = None
+        if isinstance(code_raw, int):
+            code = code_raw
+        else:
+            try:
+                code = int(str(code_raw))
+            except (TypeError, ValueError):
+                code = None
+        if code is not None:
+            formatted = f"LM Studio error {code}: {message}"
+        else:
+            formatted = f"LM Studio error: {message}"
+        return formatted, code
+
+    def _apply_reasoning_config(self, payload: dict) -> dict:
+        effort = (self.settings.reasoning_effort or "").strip()
+        if not effort:
+            return payload
+        normalized = effort.lower()
+        reasoning_block = dict(payload.get("reasoning") or {})
+        if normalized != REASONING_DEFAULT_SELECTION:
+            reasoning_block["effort"] = effort
+        reasoning_block.setdefault("enabled", True)
+        enriched = dict(payload)
+        enriched["reasoning"] = reasoning_block
+        return enriched
+
+    def _apply_provider_preferences(self, payload: dict) -> dict:
+        preferences = self.settings.provider_preferences or {}
+        cleaned = self._clean_provider_preferences(preferences)
+        if not cleaned:
+            return payload
+        enriched = dict(payload)
+        enriched["provider"] = cleaned
+        return enriched
+
+    @staticmethod
+    def _clean_provider_preferences(raw: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned: Dict[str, Any] = {}
+        for key, value in raw.items():
+            normalized = LmStudioClient._normalize_provider_value(value)
+            if normalized is not None:
+                cleaned[key] = normalized
+        return cleaned
+
+    @staticmethod
+    def _normalize_provider_value(value: Any) -> Any | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        if isinstance(value, (list, tuple)):
+            items = [
+                normalized
+                for normalized in (LmStudioClient._normalize_provider_value(item) for item in value)
+                if normalized is not None
+            ]
+            return items or None
+        if isinstance(value, dict):
+            nested = {
+                k: v
+                for k, v in (
+                    (inner_key, LmStudioClient._normalize_provider_value(inner_value))
+                    for inner_key, inner_value in value.items()
+                )
+                if v is not None
+            }
+            return nested or None
+        return value
+
+
+def _is_local_url(url: str) -> bool:
+    normalized = url or ""
+    parsed = urlparse(normalized if "://" in normalized else f"http://{normalized}")
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost"} or host.startswith("192.168.") or host.startswith("10.")
+
+
+def validate_lmstudio_settings(
+    base_url: str,
+    model: str,
+    api_key: str = "",
+    *,
+    require_api_key: Optional[bool] = None,
+) -> tuple[bool, str]:
+    url = (base_url or "").strip()
+    model_id = (model or "").strip()
+    key = (api_key or "").strip()
+    missing: list[str] = []
+    if not url:
+        missing.append("URL")
+    if not model_id:
+        missing.append("model")
+    enforce_key = require_api_key if require_api_key is not None else bool(url and not _is_local_url(url))
+    if enforce_key and not key:
+        missing.append("API key")
+    if missing:
+        hint = ", ".join(missing)
+        return False, f"LM Studio settings incomplete: {hint} required."
+    return True, ""
+
+
+def chunked(
+    lines: Iterable[str],
+    size: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    token_margin: Optional[int] = None,
+    token_counter: Optional[Callable[[str], int]] = None,
+) -> Iterator[List[str]]:
+    bucket: List[str] = []
+    bucket_tokens = 0
+    limit = None
+    counter = token_counter or estimate_tokens
+    if max_tokens:
+        safe_margin = max(0, token_margin or 0)
+        limit = max(1, max_tokens - safe_margin)
+    size_limit = max(1, size) if size and size > 0 else None
+    for line in lines:
+        line = line.rstrip("\n")
+        token_cost = counter(line)
+        exceeds_size = size_limit is not None and len(bucket) >= size_limit
+        exceeds_tokens = limit is not None and (bucket_tokens + token_cost) > limit
+        if bucket and (exceeds_size or exceeds_tokens):
+            yield bucket
+            bucket = []
+            bucket_tokens = 0
+        bucket.append(line)
+        bucket_tokens += token_cost
+    if bucket:
+        yield bucket
+
+
+estimate_tokens = token_utils.estimate_tokens
+configure_token_counter = token_utils.configure_token_counter
+# Backwards compatibility for older imports that referenced the underscored alias.
+_estimate_tokens = estimate_tokens
+
+
+def _mode_instruction(mode: str) -> str:
+    normalized = (mode or "").lower()
+    if normalized == "deep":
+        return (
+            "Deep rewrite: restructure aggressively while preserving factual meaning. "
+            "Strip emotional markers, filler reactions, and tone indicators so the output stays neutral and "
+            "dry. If an emotionally charged phrase or insult is essential to the message (e.g., it conveys a "
+            "speaker's accusation or label), keep it verbatim."
+        )
+    return "Polish rewrite: keep timing and sentences but improve grammar and clarity."
+
+
+def _align_lines(candidates: List[str], expected: int, fallback: List[str]) -> List[str]:
+    if len(candidates) == expected:
+        return candidates
+    if len(candidates) > expected:
+        return candidates[:expected]
+    padded = list(candidates)
+    for idx in range(len(padded), expected):
+        padded.append(fallback[idx])
+    return padded
+
 
 def _split_lines(raw: str, expected: int) -> Optional[List[str]]:
-    # Attempt to coerce the model output back into the original line count.
     if not raw:
         return None
     candidates = [line.strip() for line in raw.splitlines() if line.strip()]
     if len(candidates) == expected:
         return candidates
     cleaned = [_LINE_NUMBER_RE.sub("", line).strip() for line in candidates]
-    # Many models add numbering when rewriting; strip it and try again.
     cleaned = [line for line in cleaned if line]
     if len(cleaned) == expected:
         return cleaned
@@ -349,19 +668,8 @@ def _split_lines(raw: str, expected: int) -> Optional[List[str]]:
     return None
 
 
-def _estimate_tokens(text: str) -> int:
-    # Cheap heuristic that keeps budgets reasonable without external tokenizer deps.
-    stripped = text.strip()
-    if not stripped:
-        return 1
-    by_chars = (len(stripped) + 3) // 4
-    by_words = int(len(stripped.split()) * 1.1) or 1
-    return max(1, by_chars, by_words)
-
-
-def _completion_budget(lines: List[str], default: int, multiplier: float = 1.4) -> int:
-    # Scale completion allowance to input size but cap it to the configured defaults.
-    estimated = sum(_estimate_tokens(line) for line in lines)
+def _completion_budget(lines: List[str], default: Optional[int], multiplier: float = 1.4) -> int:
+    estimated = sum(token_utils.estimate_tokens(line) for line in lines)
     target = int(estimated * multiplier) + 64
     if default and default > 0:
         return min(default, max(128, target))
@@ -369,7 +677,6 @@ def _completion_budget(lines: List[str], default: int, multiplier: float = 1.4) 
 
 
 def _compose_user_prompt(instructions: str, description: str, lines: List[str]) -> str:
-    # Merge system-level instructions into the user message for models that reject system roles.
     sections: List[str] = []
     if instructions:
         sections.append("Instructions:")
@@ -382,42 +689,4 @@ def _compose_user_prompt(instructions: str, description: str, lines: List[str]) 
         sections.append("")
         sections.append("Input:")
         sections.append("\n".join(lines))
-    # Filter leading/trailing blanks introduced by missing sections.
     return "\n".join(part for part in sections if part is not None)
-
-
-def chunked(
-    iterable: List[str],
-    size: int,
-    max_tokens: int = 0,
-    token_margin: int = 512,
-) -> Iterable[List[str]]:
-    # Yield subtitle batches that respect both size and approximate token limits.
-    if not iterable:
-        return
-    max_size = max(1, size)
-    # Reserve part of the token budget for system prompts and glue text.
-    effective_limit = max(0, max_tokens - max(0, token_margin)) if max_tokens else 0
-    chunk: List[str] = []
-    token_count = 0
-    for item in iterable:
-        text = item if isinstance(item, str) else str(item)
-        tokens = _estimate_tokens(text)
-        if effective_limit and tokens > effective_limit:
-            # Emit oversized entries on their own so we do not drop content.
-            if chunk:
-                yield chunk
-                chunk = []
-                token_count = 0
-            yield [text]
-            continue
-        next_token_total = token_count + tokens
-        if chunk and (len(chunk) >= max_size or (effective_limit and next_token_total > effective_limit)):
-            # Flush the current chunk when we hit either item or token thresholds.
-            yield chunk
-            chunk = []
-            token_count = 0
-        chunk.append(text)
-        token_count += tokens
-    if chunk:
-        yield chunk
