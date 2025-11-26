@@ -47,6 +47,12 @@ override each other. Set `VIDEO_TRANSCRIBER_CONFIG_DIR` if you need a custom loc
 ### Transcript batch mode
 `python main.py batch [options]` exposes `TranscriptBatchProcessor` from `app.transcript_tool`. It discovers `.srt`, `.txt`, and Telegram JSON exports in the provided directory (recursive by default), then runs LM Studio-powered analysis, rewrite, or story passes and dumps artifacts to `transcript_tool_output/` (logs, reports, rewrites, stories, merged markdown when `--merge-story` is supplied). Pass `--mode` repeatedly to combine analysis, rewrite, and story outputs or use `--provider-options`, `--prompt-limit`, and `--reasoning-effort` to control how the batch worker calls LM Studio. The command respects the same `config.json` that powers the GUI so you can reuse your LM Studio settings and provider routing preferences.
 
+## Windows .exe builds
+- Install PyInstaller if needed: `python -m pip install pyinstaller` (run inside the repo venv).
+- Build both GUI and CLI executables: `.\build_exe.ps1` (add `-OneFile` to pack everything into single binaries).
+- Use `dist\transcriber-gui.exe` for double-click launch without a console window.
+- Use `dist\transcriber-cli.exe` when you want console logging and CLI arguments, e.g. `dist\transcriber-cli.exe transcribe input.mp4 --format srt`.
+
 
 ## Tests & Diagnostics
 The project includes a smoke-test helper that exercises the offline pipeline without requiring a

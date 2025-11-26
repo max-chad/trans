@@ -38,6 +38,10 @@ class VideoTaskWidget(QFrame):
         self.name_label.setStyleSheet(
             f"font-weight: bold; color: {AppTheme.TEXT_PRIMARY}; background: transparent; border: none;")
         info_layout.addWidget(self.name_label)
+        self.location_label = QLabel(self._relative_path_text())
+        self.location_label.setStyleSheet(
+            f"color: {AppTheme.TEXT_SECONDARY}; background: transparent; border: none; font-size: 12px;")
+        info_layout.addWidget(self.location_label)
 
         self.status_label = QLabel("В ожидании")
         self.status_label.setStyleSheet(f"color: {AppTheme.TEXT_SECONDARY}; background: transparent; border: none;")
@@ -101,6 +105,15 @@ class VideoTaskWidget(QFrame):
         actions_wrapper_layout.addStretch()
 
         main_layout.addLayout(actions_wrapper_layout)
+
+    def _relative_path_text(self) -> str:
+        root = getattr(self.task, "source_root", None)
+        if root:
+            try:
+                return str(self.task.video_path.relative_to(root))
+            except ValueError:
+                pass
+        return self.task.video_path.name
 
     def request_translation(self):
         self.translate_requested.emit(self.task.task_id)

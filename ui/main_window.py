@@ -16,6 +16,10 @@ from .styles import AppTheme
 
 
 class MainWindow(QMainWindow):
+    VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".mpg", ".mpeg", ".m4v", ".webm"}
+    AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma"}
+    MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
@@ -600,22 +604,63 @@ class MainWindow(QMainWindow):
         self.config.set("post_processing_action", self.post_action_combo.currentData())
         self.config.set("post_processing_notification_text", self.post_notification_input.text().strip())
     def browse_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Выберите видео файлы", "",
-                                                "Видео файлы (*.mp4 *.mkv *.avi *.mov)")
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Выберите видео или аудио файлы",
+            "",
+            "Медиа файлы (*.mp4 *.mkv *.avi *.mov *.mpg *.mpeg *.m4v *.webm *.wav *.mp3 *.flac *.m4a *.aac *.ogg *.oga *.opus *.wma)"
+        )
         if files:
             self.add_video_files([Path(f) for f in files])
 
     def select_output_dir(self):
-        directory = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения")
+        directory = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения результатов")
         if directory:
             self.output_label.setText(directory)
 
-    def add_video_files(self, file_paths: list[Path]):
+    def _is_supported_media(self, path: Path) -> bool:
+        return path.suffix.lower() in self.MEDIA_EXTENSIONS
+
+    def add_videos_from_directory(self, directory: Path):
+        resolved_dir = directory.resolve()
+        if not resolved_dir.exists() or not resolved_dir.is_dir():
+            self.log_message("warning", f"Папка недоступна: {directory}")
+            return
+        video_files = [
+            path for path in resolved_dir.rglob("*")
+            if path.is_file() and self._is_supported_media(path)
+        ]
+        if not video_files:
+            self.log_message("warning", f"Видео не найдено в папке: {resolved_dir}")
+            return
+        self.log_message("info", f"Добавляю {len(video_files)} файлов из {resolved_dir}")
+        self.add_video_files(video_files, source_root=resolved_dir, use_video_dir_as_output=True)
+
+    def add_video_files(self, file_paths: list[Path], *, source_root: Path | None = None, use_video_dir_as_output: bool = False):
+        root = source_root.resolve() if source_root else None
         for path in file_paths:
-            if any(path.name == task.video_path.name for task in self.tasks.values()):
-                self.log_message("warning", f"Файл '{path.name}' уже находится в очереди.")
+            if path.is_dir():
+                self.add_videos_from_directory(path)
                 continue
-            task = TranscriptionTask(video_path=path, output_dir=Path(), output_format="", language="", model_size="")
+            if not path.exists():
+                self.log_message("warning", f"Файл не найден: {path}")
+                continue
+            if not self._is_supported_media(path):
+                continue
+            resolved_path = path.resolve()
+            if any(task.video_path.resolve() == resolved_path for task in self.tasks.values()):
+                self.log_message("warning", f"Видео '{path.name}' уже добавлено и не будет продублировано.")
+                continue
+            output_dir = resolved_path.parent if use_video_dir_as_output else Path()
+            task = TranscriptionTask(
+                video_path=resolved_path,
+                output_dir=output_dir,
+                output_format="",
+                language="",
+                model_size="",
+            )
+            task.source_root = root
+            task.use_source_dir_as_output = use_video_dir_as_output
             self.tasks[task.task_id] = task
             self.add_task_widget(task)
 
@@ -688,7 +733,13 @@ class MainWindow(QMainWindow):
 
         for task_id, task in self.tasks.items():
             if task.status == "pending":
-                task.output_dir = Path(self.config.get("output_dir"))
+                configured_output = self.config.get("output_dir")
+                if getattr(task, "use_source_dir_as_output", False):
+                    task.output_dir = task.video_path.parent
+                elif configured_output:
+                    task.output_dir = Path(configured_output)
+                else:
+                    task.output_dir = task.video_path.parent
                 task.output_format = "txt" if selected_formats[0].startswith("txt") else selected_formats[0]
                 task.language = self.config.get("language")
                 task.model_size = self.config.get("model_size")

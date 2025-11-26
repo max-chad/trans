@@ -42,6 +42,8 @@ class TranscriptionTask:
     lmstudio_load_timeout: float = 600.0
     lmstudio_poll_interval: float = 1.5
     staged_transcript_path: Optional[Path] = None
+    source_root: Optional[Path] = None
+    use_source_dir_as_output: bool = False
 
 
 @dataclass

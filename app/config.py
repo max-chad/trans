@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 import hashlib
@@ -17,6 +18,9 @@ _PROJECTS_SUBDIR = "projects"
 
 
 def _project_root() -> Path:
+    # When packaged as an .exe, resolve paths relative to the executable so config/log dirs stay stable.
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     resolved = Path(__file__).resolve()
     parents = resolved.parents
     return parents[1] if len(parents) > 1 else resolved.parent

@@ -66,9 +66,12 @@ class LmStudioClient:
             raise ValueError("LM Studio base URL is required.")
         if not settings.model:
             raise ValueError("LM Studio model is required.")
+        normalized_base = self._normalize_base_url(settings.base_url)
+        settings.base_url = normalized_base
         self.settings = settings
         self._session = session or requests.Session()
         self._max_attempts = 3
+        self._base_url = normalized_base
 
     @property
     def session(self) -> Session:
@@ -276,13 +279,26 @@ class LmStudioClient:
         return headers
 
     def _url(self, path: str) -> str:
-        base = self.settings.base_url.rstrip("/")
+        base = self._base_url.rstrip("/")
         return f"{base}/{path.lstrip('/')}"
 
-    @staticmethod
-    def _models_endpoint(base_url: str) -> str:
-        base = base_url.rstrip("/")
+    @classmethod
+    def _models_endpoint(cls, base_url: str) -> str:
+        base = cls._normalize_base_url(base_url).rstrip("/")
         return f"{base}/models"
+
+    @staticmethod
+    def _normalize_base_url(base_url: str) -> str:
+        cleaned = (base_url or "").strip()
+        if not cleaned:
+            return ""
+        parsed = urlparse(cleaned if "://" in cleaned else f"http://{cleaned}")
+        path = (parsed.path or "").rstrip("/")
+        parts = [part for part in path.split("/") if part]
+        if "v1" not in parts:
+            path = f"{path}/v1" if path else "/v1"
+        normalized = parsed._replace(path=path or "/").geturl()
+        return normalized.rstrip("/")
 
     @staticmethod
     def _matches_entry(entry: Dict[str, Any], normalized_target: str) -> bool:
@@ -476,6 +492,8 @@ class LmStudioClient:
         if not isinstance(payload, dict):
             return None
         error_block = payload.get("error")
+        if isinstance(error_block, str):
+            return f"LM Studio error: {error_block}", None
         if not isinstance(error_block, dict):
             return None
         message = str(error_block.get("message") or "Unknown LM Studio error")
