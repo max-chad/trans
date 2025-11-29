@@ -16,70 +16,21 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Dict, List, Optional, Tuple
 
-_CUDA_PATHS_CONFIGURED = False
-_CUDA_DLL_HANDLES: List[object] = []
-_CUDA_DLL_PATHS: List[str] = []
-_CUDA_PATH_LOGGED = False
+from .audio import (
+    AUDIO_EXTENSIONS,
+    SILENCE_GAP_SECONDS,
+    extract_audio,
+    group_segments_by_speaker,
+    build_word_timeline,
+)
+from .device import DeviceContext, configure_cuda_dll_search_path
+from .diarization import DiarizationService
 
 # Добавляем CUDA-библиотеки в системные пути, чтобы Whisper мог работать на GPU в Windows.
 
 
-def _configure_cuda_dll_search_path() -> None:
-    global _CUDA_PATHS_CONFIGURED
-    if _CUDA_PATHS_CONFIGURED or os.name != "nt":
-        return
-    base = Path(sys.prefix) if hasattr(sys, "prefix") else None
-    candidates: list[Path] = []
-    cuda_root: Optional[Path] = None
-    if base:
-        site_root = base / "Lib" / "site-packages" / "nvidia"
-        cuda_root = site_root
-        for subdir in ("cublas", "cudnn", "cuda_runtime"):
-            candidates.append(site_root / subdir / "bin")
-            candidates.append(site_root / subdir / "lib" / "x64")
-        torch_lib = base / "Lib" / "site-packages" / "torch" / "lib"
-        candidates.append(torch_lib)
-        # Some wheel builds place CUDA DLLs directly under torch root.
-        candidates.append(torch_lib.parent)
-    env_path = os.environ.get("PATH", "")
-    updated_env = env_path
-    seen = {part for part in env_path.split(os.pathsep) if part}
-    for directory in candidates:
-        if not directory.is_dir():
-            continue
-        directory_str = str(directory)
-        try:
-            handle = os.add_dll_directory(directory_str)
-            _CUDA_DLL_HANDLES.append(handle)
-            _CUDA_DLL_PATHS.append(directory_str)
-        except AttributeError:
-            if directory_str not in seen:
-                updated_env = directory_str + os.pathsep + updated_env
-                seen.add(directory_str)
-                _CUDA_DLL_PATHS.append(directory_str)
-    if updated_env != env_path:
-        os.environ["PATH"] = updated_env
-        # Propagate CUDA_PATH for libraries that inspect it explicitly.
-        target_root = cuda_root or base
-        if target_root:
-            os.environ.setdefault("CUDA_PATH", str(target_root))
-    for lib_name in (
-        "cublas64_12.dll",
-        "cublasLt64_12.dll",
-        "cudart64_12.dll",
-        "cusolver64_11.dll",
-        "cusparse64_12.dll",
-    ):
-        try:
-            ctypes.WinDLL(lib_name)
-        except OSError:
-            # Leave detailed logging to the worker when the issue manifests.
-            continue
-    _CUDA_PATHS_CONFIGURED = True
-
-
 if os.name == "nt":
-    _configure_cuda_dll_search_path()
+    configure_cuda_dll_search_path()
 
 import torch
 import whisper
@@ -113,76 +64,6 @@ from .lmstudio_client import (
 )
 
 # Контекст вычислительного устройства с очередью задач и загруженной моделью.
-@dataclass
-class _DeviceContext:
-    device: str
-    queue: "Queue[Optional[TranscriptionTask]]" = field(default_factory=Queue)
-    thread: Optional[threading.Thread] = None
-    model: Optional[object] = None
-    model_size: Optional[str] = None
-    backend: Optional[str] = None
-    compute_type: Optional[str] = None
-    runtime_device: str = "cpu"
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    stop_event: threading.Event = field(default_factory=threading.Event)
-    active: bool = False
-
-
-# Допустимые расширения файлов, из которых можно извлекать аудио.
-AUDIO_EXTENSIONS = {
-    ".wav",
-    ".mp3",
-    ".flac",
-    ".m4a",
-    ".aac",
-    ".ogg",
-    ".oga",
-    ".opus",
-    ".wma",
-}
-
-# Minimal gap that should be marked explicitly as silence (in seconds).
-SILENCE_GAP_SECONDS = 0.75
-
-
-# Запускаем ffmpeg через CLI и конвертируем входной файл в WAV.
-def _run_ffmpeg_cli(input_path: Path, output_path: Path) -> bool:
-    executable = shutil.which("ffmpeg")
-    if not executable:
-        return False
-    if output_path.exists():
-        try:
-            output_path.unlink()
-        except OSError:
-            return False
-    cmd = [
-        executable,
-        "-y",
-        "-i",
-        str(input_path),
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        str(output_path),
-    ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    return result.returncode == 0 and output_path.exists()
-
-
-# Пробуем извлечь аудио через moviepy, затем через ffmpeg как резерв.
-def _extract_with_ffmpeg(input_path: Path, output_path: Path) -> bool:
-    if output_path.exists():
-        try:
-            output_path.unlink()
-        except OSError:
-            return False
-    if ffmpeg_extract_audio is not None:
-        try:
-            ffmpeg_extract_audio(str(input_path), str(output_path))
-            return output_path.exists()
-        except Exception:
-            pass
-    return _run_ffmpeg_cli(input_path, output_path)
 
 
 # Рабочий поток, который принимает задачи транскрибации и управляет выводом результатов.
@@ -196,7 +77,7 @@ class TranscriptionWorker(QThread):
     # Инициализируем рабочий поток и все очереди.
     def __init__(self):
         super().__init__()
-        _configure_cuda_dll_search_path()
+        configure_cuda_dll_search_path()
         # Настраиваем очереди, контексты устройств и вспомогательные потоки.
         self.tasks_queue: "Queue[TranscriptionTask]" = Queue()
         self.settings = ProcessingSettings()
@@ -205,9 +86,9 @@ class TranscriptionWorker(QThread):
         self._lock = threading.Lock()
         self._ffmpeg_checked = False
         self._ffmpeg_available = False
-        self._contexts: Dict[str, _DeviceContext] = {"cpu": _DeviceContext("cpu")}
+        self._contexts: Dict[str, DeviceContext] = {"cpu": DeviceContext("cpu")}
         if torch.cuda.is_available():
-            self._contexts["cuda"] = _DeviceContext("cuda")
+            self._contexts["cuda"] = DeviceContext("cuda")
         self._hybrid_last_device = "cuda"
         self._shutdown_event = threading.Event()
         self._correction_shutdown = threading.Event()
@@ -223,6 +104,7 @@ class TranscriptionWorker(QThread):
         self._staged_corrections: List[TranscriptionTask] = []
         self._in_correction_phase = False
         self._active_transcriptions = 0
+        self.diarization = DiarizationService(device="cuda" if torch.cuda.is_available() else "cpu")
 
     # Обновляем параметры обработки и при необходимости запускаем или завершаем фазу корректировки.
     def update_processing_settings(self, settings: ProcessingSettings):
@@ -274,7 +156,7 @@ class TranscriptionWorker(QThread):
             self._cleanup_staged_transcript(task)
 
     # Сбрасываем и выгружаем модель из контекста, очищая память устройства.
-    def _release_context_model(self, context: _DeviceContext):
+    def _release_context_model(self, context: DeviceContext):
         with context.lock:
             if context.model is not None:
                 try:
@@ -330,7 +212,18 @@ class TranscriptionWorker(QThread):
         audio_path: Optional[Path],
         segments: List[dict],
     ) -> List[dict]:
-        return segments
+        if not task.enable_diarization or not audio_path or not audio_path.exists():
+            return segments
+        
+        self.log_message.emit("info", f"Starting speaker diarization for {task.video_path.name}...")
+        try:
+            # DiarizationService.run modifies segments in-place or returns them
+            diarized_segments = self.diarization.run(audio_path, segments, num_speakers=task.num_speakers)
+            self.log_message.emit("success", "Speaker diarization completed.")
+            return diarized_segments
+        except Exception as e:
+            self.log_message.emit("error", f"Diarization failed: {e}")
+            return segments
 
     # Фиксируем старт обработки задачи для дальнейшей статистики.
     def _mark_task_start(self, task: TranscriptionTask):
@@ -682,7 +575,7 @@ class TranscriptionWorker(QThread):
                 self._correction_queue.task_done()
 
     # Загружаем модель openai-whisper в заданный контекст, учитывая доступность CUDA.
-    def _load_openai_whisper(self, context: _DeviceContext, size: str) -> bool:
+    def _load_openai_whisper(self, context: DeviceContext, size: str) -> bool:
         target_device = context.device if context.device in {"cpu", "cuda"} else "cpu"
         if target_device == "cuda" and not torch.cuda.is_available():
             target_device = "cpu"
@@ -733,7 +626,7 @@ class TranscriptionWorker(QThread):
         return False
 
     # Загружаем faster-whisper и обрабатываем падение на CPU при ошибках CUDA.
-    def _load_faster_whisper(self, context: _DeviceContext, size: str, compute_type: str) -> bool:
+    def _load_faster_whisper(self, context: DeviceContext, size: str, compute_type: str) -> bool:
         try:
             from faster_whisper import WhisperModel
         except ImportError:
@@ -807,7 +700,7 @@ class TranscriptionWorker(QThread):
         return False
 
     # Гарантируем, что нужная модель загружена в контекст; при несоответствии переинициализируем.
-    def _ensure_model_for_context(self, context: _DeviceContext, backend: str, size: str, compute_type: str) -> bool:
+    def _ensure_model_for_context(self, context: DeviceContext, backend: str, size: str, compute_type: str) -> bool:
         desired_backend = (backend or "openai").lower()
         normalized_compute = (compute_type or "int8").lower()
         current_backend = (context.backend or "").lower()
@@ -830,136 +723,15 @@ class TranscriptionWorker(QThread):
 
     # Извлекаем WAV-дорожку из видео или аудио-файла, используя ffmpeg и moviepy как резерв.
     def _extract_audio(self, source_path: Path) -> Tuple[Path, bool]:
-        ext = source_path.suffix.lower()
-        if ext == ".wav":
-            return source_path, False
-        temp_audio = source_path.with_name(f"{source_path.stem}_temp_audio.wav")
+        try:
+            return extract_audio(source_path, lambda level, msg: self.log_message.emit(level, msg))
+        except RuntimeError as exc:
+            raise exc
 
-        if _extract_with_ffmpeg(source_path, temp_audio):
-            return temp_audio, True
-
-        if ext in AUDIO_EXTENSIONS:
-            if AudioFileClip is not None:
-                try:
-                    with AudioFileClip(str(source_path)) as audio:
-                        audio.write_audiofile(str(temp_audio), codec="pcm_s16le", logger=None)
-                    return temp_audio, True
-                except Exception as exc:
-                    self.log_message.emit(
-                        "warning",
-                        f"MoviePy failed to export audio from {source_path.name}: {exc}",
-                    )
-            else:
-                self.log_message.emit(
-                    "warning",
-                    "MoviePy is not installed; skipping AudioFileClip fallback.",
-                )
-            if _run_ffmpeg_cli(source_path, temp_audio):
-                return temp_audio, True
-        else:
-            if VideoFileClip is not None:
-                try:
-                    video = VideoFileClip(str(source_path))
-                    try:
-                        audio = video.audio
-                        if audio is None:
-                            raise ValueError("Video has no audio track.")
-                        audio.write_audiofile(str(temp_audio), codec="pcm_s16le", logger=None)
-                        return temp_audio, True
-                    finally:
-                        video.close()
-                except Exception as exc:
-                    self.log_message.emit(
-                        "warning",
-                        f"MoviePy failed to extract audio track from {source_path.name}: {exc}",
-                    )
-            else:
-                self.log_message.emit(
-                    "warning",
-                    "MoviePy is not installed; skipping VideoFileClip fallback.",
-                )
-            if _run_ffmpeg_cli(source_path, temp_audio):
-                return temp_audio, True
-
-        raise RuntimeError(
-            f"Failed to extract audio from {source_path.name}. "
-            "Install MoviePy or ensure ffmpeg is available in PATH."
-        )
-
-    # Сохраняем сегменты в формате .srt с поддержкой имён говорящих.
-    def _silence_entry(self, start: float, end: float) -> Optional[dict]:
-        """Return a placeholder segment for a silent gap."""
-        duration = max(0.0, end - start)
-        if duration <= 0:
-            return None
-        label = "[silence]" if duration < 1.0 else f"[silence {duration:.1f}s]"
-        return {
-            "start": start,
-            "end": end,
-            "text": label,
-            "speaker": None,
-            "is_silence": True,
-        }
-
-    def _build_word_timeline(self, segments: List[dict]) -> List[dict]:
-        """Flatten phrase-level segments into per-word timeline with silence markers."""
-        timeline: List[dict] = []
-        previous_end = 0.0
-        for seg in segments:
-            seg_start = float(seg.get("start", 0.0) or 0.0)
-            seg_end = float(seg.get("end", seg_start) or seg_start)
-            speaker = seg.get("speaker")
-            words = seg.get("words") or []
-            if words:
-                for word in words:
-                    start = float(word.get("start", seg_start) or seg_start)
-                    end = float(word.get("end", start) or start)
-                    gap = start - previous_end
-                    if gap >= SILENCE_GAP_SECONDS and start > previous_end:
-                        silence = self._silence_entry(previous_end, start)
-                        if silence:
-                            timeline.append(silence)
-                    text = (word.get("text") or word.get("word") or "").strip()
-                    if not text:
-                        continue
-                    timeline.append(
-                        {
-                            "start": start,
-                            "end": end if end > start else start,
-                            "text": text,
-                            "speaker": speaker,
-                            "is_silence": False,
-                        }
-                    )
-                    previous_end = max(previous_end, end)
-                if seg_end - previous_end >= SILENCE_GAP_SECONDS and seg_end > previous_end:
-                    silence = self._silence_entry(previous_end, seg_end)
-                    if silence:
-                        timeline.append(silence)
-                if seg_end > previous_end:
-                    previous_end = seg_end
-                continue
-            if seg_start - previous_end >= SILENCE_GAP_SECONDS and seg_start > previous_end:
-                silence = self._silence_entry(previous_end, seg_start)
-                if silence:
-                    timeline.append(silence)
-            text = seg.get("text", "").strip()
-            if text:
-                timeline.append(
-                    {
-                        "start": seg_start,
-                        "end": seg_end if seg_end > seg_start else seg_start,
-                        "text": text,
-                        "speaker": speaker,
-                        "is_silence": False,
-                    }
-                )
-            previous_end = max(previous_end, seg_end)
-        return timeline
 
     def _save_as_srt(self, segments: List[dict], output_path: Path):
         srt_segments: List[srt.Subtitle] = []
-        timeline = self._build_word_timeline(segments) or segments
+        timeline = build_word_timeline(segments) or segments
         for i, seg in enumerate(timeline, 1):
             text = seg.get("text", "").strip()
             if not text:
@@ -991,7 +763,7 @@ class TranscriptionWorker(QThread):
     def _save_as_txt(self, segments: List[dict], output_path: Path, include_timestamps: bool = False):
         with open(output_path, "w", encoding="utf-8") as f:
             if include_timestamps:
-                timeline = self._build_word_timeline(segments) or segments
+                timeline = build_word_timeline(segments) or segments
                 for segment in timeline:
                     text = segment.get("text", "").strip()
                     if not text:
@@ -1055,7 +827,7 @@ class TranscriptionWorker(QThread):
                 f.write(f"{start} --> {end}\n{text}\n\n")
 
     # Выполняем транскрибацию аудио выбранным бэкендом и возвращаем список сегментов.
-    def _transcribe(self, context: _DeviceContext, audio_path: Path, language: str) -> List[dict]:
+    def _transcribe(self, context: DeviceContext, audio_path: Path, language: str) -> List[dict]:
         model = context.model
         if model is None:
             return []
@@ -1346,7 +1118,7 @@ class TranscriptionWorker(QThread):
         return adjusted
 
     # Полный цикл обработки задачи: подготовка аудио, транскрибация, пост-обработка и очистка.
-    def _process_task_for_context(self, context: _DeviceContext, task: TranscriptionTask):
+    def _process_task_for_context(self, context: DeviceContext, task: TranscriptionTask):
         audio_path: Optional[Path] = None
         cleanup = False
         self._increment_active_transcriptions()
@@ -1444,12 +1216,12 @@ class TranscriptionWorker(QThread):
                     pass
 
     # Помещаем задачу в очередь конкретного устройства, запуская поток при необходимости.
-    def _enqueue_task_for_context(self, context: _DeviceContext, task: TranscriptionTask):
+    def _enqueue_task_for_context(self, context: DeviceContext, task: TranscriptionTask):
         self._start_context_thread(context)
         context.queue.put(task)
 
     # Запускаем рабочий поток для устройства, если он ещё не активен.
-    def _start_context_thread(self, context: _DeviceContext):
+    def _start_context_thread(self, context: DeviceContext):
         if context.thread and context.thread.is_alive():
             return
         context.stop_event.clear()
@@ -1457,7 +1229,7 @@ class TranscriptionWorker(QThread):
         context.thread.start()
 
     # Выбираем подходящий контекст устройства исходя из настроек задачи.
-    def _choose_context_for_task(self, task: TranscriptionTask) -> _DeviceContext:
+    def _choose_context_for_task(self, task: TranscriptionTask) -> DeviceContext:
         device = (task.device or "cpu").lower()
         if device == "auto":
             device = "cuda" if "cuda" in self._contexts else "cpu"
@@ -1495,7 +1267,7 @@ class TranscriptionWorker(QThread):
         return "cpu"
 
     # Основной цикл работы устройства: берём задачи из очереди и обрабатываем их.
-    def _device_worker_loop(self, context: _DeviceContext):
+    def _device_worker_loop(self, context: DeviceContext):
         while not self._shutdown_event.is_set() and not context.stop_event.is_set():
             try:
                 task = context.queue.get(timeout=0.1)

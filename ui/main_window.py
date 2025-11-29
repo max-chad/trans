@@ -1,5 +1,6 @@
 from pathlib import Path
 import time
+import uuid
 
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
@@ -223,7 +224,6 @@ class MainWindow(QMainWindow):
         drop_area.dropEvent = drop_event
         drop_area.mousePressEvent = lambda _: self.browse_files()
         return drop_area
-
     def _create_controls_panel(self):
         controls_group = QGroupBox("Настройки обработки")
         controls_group.setStyleSheet(AppTheme.GROUPBOX_STYLE)
@@ -239,30 +239,41 @@ class MainWindow(QMainWindow):
         basic_layout = QGridLayout(basic_tab)
         basic_layout.setColumnStretch(1, 1)
 
-        basic_layout.addWidget(QLabel("Папка результата:"), 0, 0)
+        # Row 0: Output Mode
+        basic_layout.addWidget(QLabel("Режим сохранения:"), 0, 0)
+        self.output_mode_combo = QComboBox()
+        self.output_mode_combo.addItem("В папку с файлом", "source")
+        self.output_mode_combo.addItem("В выбранную папку", "custom")
+        self.output_mode_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
+        self.output_mode_combo.currentIndexChanged.connect(self._update_output_controls)
+        basic_layout.addWidget(self.output_mode_combo, 0, 1, 1, 2)
+
+        # Row 1: Output Folder
+        self.output_folder_label_title = QLabel("Папка результата:")
+        basic_layout.addWidget(self.output_folder_label_title, 1, 0)
         self.output_label = QLabel("")
         self.output_label.setStyleSheet(
             f"color: {AppTheme.TEXT_SECONDARY}; padding: 5px; border: 1px solid {AppTheme.BORDER}; border-radius: 5px;"
         )
-        basic_layout.addWidget(self.output_label, 0, 1)
-        output_btn = QPushButton("Выбрать")
-        output_btn.setStyleSheet(AppTheme.SECONDARY_BUTTON_STYLE)
-        output_btn.clicked.connect(self.select_output_dir)
-        basic_layout.addWidget(output_btn, 0, 2)
+        basic_layout.addWidget(self.output_label, 1, 1)
+        self.output_btn = QPushButton("Выбрать")
+        self.output_btn.setStyleSheet(AppTheme.SECONDARY_BUTTON_STYLE)
+        self.output_btn.clicked.connect(self.select_output_dir)
+        basic_layout.addWidget(self.output_btn, 1, 2)
 
-        basic_layout.addWidget(QLabel("Язык распознавания:"), 1, 0)
+        basic_layout.addWidget(QLabel("Язык распознавания:"), 2, 0)
         self.lang_combo = QComboBox()
         self.lang_combo.addItems(["auto", "ru", "en", "de", "fr", "es", "it", "uk", "pl"])
         self.lang_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        basic_layout.addWidget(self.lang_combo, 1, 1, 1, 2)
+        basic_layout.addWidget(self.lang_combo, 2, 1, 1, 2)
 
-        basic_layout.addWidget(QLabel("Модель Whisper:"), 2, 0)
+        basic_layout.addWidget(QLabel("Модель Whisper:"), 3, 0)
         self.model_combo = QComboBox()
         self.model_combo.addItems(["tiny", "base", "small", "medium", "large"])
         self.model_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        basic_layout.addWidget(self.model_combo, 2, 1, 1, 2)
+        basic_layout.addWidget(self.model_combo, 3, 1, 1, 2)
 
-        basic_layout.addWidget(QLabel("Устройство инференса:"), 3, 0)
+        basic_layout.addWidget(QLabel("Устройство инференса:"), 4, 0)
         self.device_group = QButtonGroup()
         device_layout = QHBoxLayout()
         self.cpu_radio = QRadioButton("CPU")
@@ -279,9 +290,9 @@ class MainWindow(QMainWindow):
         device_layout.addWidget(self.cpu_radio)
         device_layout.addWidget(self.gpu_radio)
         device_layout.addWidget(self.hybrid_radio)
-        basic_layout.addLayout(device_layout, 3, 1, 1, 2)
+        basic_layout.addLayout(device_layout, 4, 1, 1, 2)
 
-        basic_layout.addWidget(QLabel("Форматы субтитров:"), 4, 0)
+        basic_layout.addWidget(QLabel("Форматы субтитров:"), 5, 0)
         formats_layout = QGridLayout()
         self.output_format_checks = {
             "srt": QCheckBox("SRT"),
@@ -294,14 +305,14 @@ class MainWindow(QMainWindow):
             row = idx // 2
             col = idx % 2
             formats_layout.addWidget(checkbox, row, col)
-        basic_layout.addLayout(formats_layout, 4, 1, 1, 2)
+        basic_layout.addLayout(formats_layout, 5, 1, 1, 2)
 
-        basic_layout.addWidget(QLabel("Язык перевода:"), 5, 0)
+        basic_layout.addWidget(QLabel("Язык перевода:"), 6, 0)
         self.translate_lang_combo = QComboBox()
         self.translate_lang_combo.addItems(["en", "ru", "de", "fr", "es", "it", "uk", "pl"])
         self.translate_lang_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        basic_layout.addWidget(self.translate_lang_combo, 5, 1, 1, 2)
-        basic_layout.setRowStretch(6, 1)
+        basic_layout.addWidget(self.translate_lang_combo, 6, 1, 1, 2)
+        basic_layout.setRowStretch(7, 1)
         self.settings_tabs.addTab(basic_tab, "Основные")
 
         advanced_tab = QWidget()
@@ -393,11 +404,19 @@ class MainWindow(QMainWindow):
         self.settings_tabs.addTab(advanced_tab, "Дополнительно")
 
         return controls_group
+
     def _update_post_action_controls(self):
         action = self.post_action_combo.currentData()
         is_notify = action == "notify"
         self.post_notification_label.setVisible(is_notify)
         self.post_notification_input.setVisible(is_notify)
+
+    def _update_output_controls(self):
+        mode = self.output_mode_combo.currentData()
+        is_custom = mode == "custom"
+        self.output_folder_label_title.setVisible(is_custom)
+        self.output_label.setVisible(is_custom)
+        self.output_btn.setVisible(is_custom)
 
     def _create_right_panel(self):
         panel = QWidget()
@@ -485,7 +504,16 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 self.left_splitter.setSizes([360, 520])
         self._restore_maximized = bool(self.config.get("window_maximized"))
+        
+        output_mode = self.config.get("output_mode") or "source"
+        idx = self.output_mode_combo.findData(output_mode)
+        if idx >= 0:
+            self.output_mode_combo.setCurrentIndex(idx)
+        else:
+            self.output_mode_combo.setCurrentIndex(0)
+            
         self.output_label.setText(self.config.get("output_dir"))
+        self._update_output_controls()
         self.model_combo.setCurrentText(self.config.get("model_size"))
         self.lang_combo.setCurrentText(self.config.get("language"))
         self.translate_lang_combo.setCurrentText(self.config.get("translate_lang") or "en")
@@ -566,6 +594,7 @@ class MainWindow(QMainWindow):
         self.config.set("splitter_sizes", self.main_splitter.sizes())
         if hasattr(self, "left_splitter"):
             self.config.set("left_splitter_sizes", self.left_splitter.sizes())
+        self.config.set("output_mode", self.output_mode_combo.currentData())
         self.config.set("output_dir", self.output_label.text())
         self.config.set("model_size", self.model_combo.currentText())
         self.config.set("language", self.lang_combo.currentText())
@@ -638,6 +667,30 @@ class MainWindow(QMainWindow):
 
     def add_video_files(self, file_paths: list[Path], *, source_root: Path | None = None, use_video_dir_as_output: bool = False):
         root = source_root.resolve() if source_root else None
+        
+        # Pre-fetch settings
+        backend = self.config.get("whisper_backend") or "faster"
+        if backend not in {"faster", "openai"}:
+            backend = "faster"
+        compute_type = self.config.get("faster_whisper_compute_type") or "int8"
+        use_correction = bool(self.config.get("use_local_llm_correction"))
+        deep_correction = bool(self.config.get("deep_correction_enabled"))
+        use_lmstudio = bool(self.config.get("lmstudio_enabled"))
+        lm_base = self.config.get("lmstudio_base_url") or ""
+        lm_model = self.config.get("lmstudio_model") or ""
+        lm_key = self.config.get("lmstudio_api_key") or ""
+        
+        batch_size = int(self.config.get("correction_batch_size") or 40)
+        lm_batch = int(self.config.get("lmstudio_batch_size") or batch_size)
+        prompt_limit = int(self.config.get("lmstudio_prompt_token_limit") or 8192)
+        load_timeout = int(self.config.get("lmstudio_load_timeout") or 600)
+        poll_interval = float(self.config.get("lmstudio_poll_interval") or 1.5)
+        pipeline_mode = self.config.get("parallel_mode") or "balanced"
+        
+        selected_formats = list(self.config.get("output_formats_multi") or ["srt"])
+        if not selected_formats:
+            selected_formats = ["srt"]
+
         for path in file_paths:
             if path.is_dir():
                 self.add_videos_from_directory(path)
@@ -651,128 +704,111 @@ class MainWindow(QMainWindow):
             if any(task.video_path.resolve() == resolved_path for task in self.tasks.values()):
                 self.log_message("warning", f"Видео '{path.name}' уже добавлено и не будет продублировано.")
                 continue
-            output_dir = resolved_path.parent if use_video_dir_as_output else Path()
+
+            task_id = f"task_{uuid.uuid4().hex}"
+            out_dir = Path(self.config.get("output_dir"))
+            if use_video_dir_as_output:
+                out_dir = resolved_path.parent
+            elif self.config.get("output_mode") == "source":
+                 out_dir = resolved_path.parent
+            
             task = TranscriptionTask(
+                task_id=task_id,
                 video_path=resolved_path,
-                output_dir=output_dir,
-                output_format="",
-                language="",
-                model_size="",
+                output_dir=out_dir,
+                output_format=self.config.get("output_format") or "srt",
+                language=self.config.get("language") or "auto",
+                model_size=self.config.get("model_size") or "base",
+                source_root=root
             )
-            task.source_root = root
-            task.use_source_dir_as_output = use_video_dir_as_output
-            self.tasks[task.task_id] = task
-            self.add_task_widget(task)
+            
+            task.whisper_backend = backend
+            task.faster_whisper_compute_type = compute_type
+            task.use_local_llm_correction = use_correction
+            task.deep_correction = deep_correction
+            task.use_lmstudio = use_lmstudio
+            task.lmstudio_base_url = lm_base
+            task.lmstudio_model = lm_model
+            task.lmstudio_api_key = lm_key
+            task.lmstudio_batch_size = lm_batch
+            task.lmstudio_prompt_token_limit = prompt_limit
+            task.lmstudio_load_timeout = load_timeout
+            task.lmstudio_poll_interval = poll_interval
+            task.pipeline_mode = pipeline_mode
+            
+            task.outputs = [
+                OutputRequest(format=fmt, include_timestamps=fmt in {"txt_ts", "txt_timestamps"})
+                for fmt in selected_formats
+            ]
+            task.include_timestamps = any(req.include_timestamps for req in task.outputs)
+            task.error = None
+            task.progress = 0
+            task.status = "queued"
+            task.result_paths = []
+            
+            self.tasks[task_id] = task
+            
+            # Create widget
+            widget = VideoTaskWidget(task)
+            widget.remove_requested.connect(self.remove_task)
+            widget.translate_requested.connect(self.handle_translation_request)
+            self.task_widgets[task_id] = widget
+            self.tasks_layout.insertWidget(self.tasks_layout.count() - 1, widget)
+            
+            self.worker.add_task(task)
+            
+        self.log_message("info", f"Запущена обработка {len(self.tasks)} задач.")
+        self.check_all_tasks_done()
 
-    def add_task_widget(self, task):
-        widget = VideoTaskWidget(task)
-        widget.remove_requested.connect(self.remove_task)
-        widget.translate_requested.connect(self.handle_translation_request)
-        self.task_widgets[task.task_id] = widget
-        count = self.tasks_layout.count()
-        self.tasks_layout.insertWidget(count - 1, widget)
-
-    def remove_task(self, task_id):
-        if task_id in self.task_widgets:
-            self.task_widgets[task_id].deleteLater()
-            del self.task_widgets[task_id]
+    def remove_task(self, task_id: str):
         if task_id in self.tasks:
             del self.tasks[task_id]
+        if task_id in self.task_widgets:
+            widget = self.task_widgets.pop(task_id)
+            self.tasks_layout.removeWidget(widget)
+            widget.deleteLater()
+        self.check_all_tasks_done()
 
     def clear_all_tasks(self):
-        for task_id in list(self.tasks.keys()):
-            self.remove_task(task_id)
+        if any(t.status == "processing" for t in self.tasks.values()):
+             QMessageBox.warning(self, "Ошибка", "Нельзя очистить список во время обработки.")
+             return
+        
+        ids = list(self.tasks.keys())
+        for tid in ids:
+            self.remove_task(tid)
+        self.log_message("info", "Список задач очищен.")
 
     def start_processing(self):
-        self._apply_gpu_defaults()
         if not self.tasks:
-            QMessageBox.warning(self, "Нет заданий", "Добавьте хотя бы один медиафайл для обработки.")
+            QMessageBox.warning(self, "Ошибка", "Нет задач для обработки.")
             return
-        self.save_settings()
-        if bool(self.config.get("lmstudio_enabled")) and bool(self.config.get("use_local_llm_correction")):
-            if not self._lmstudio_preflight():
-                return
+            
+        queued = [t for t in self.tasks.values() if t.status in ("queued", "pending", "failed")]
+        if not queued:
+             QMessageBox.information(self, "Info", "Все задачи уже выполнены.")
+             return
+
         self.process_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-
-        correction_batch_size = int(
-            self.config.get("correction_batch_size")
-            or self.config.get("llama_batch_size")
-            or 40
-        )
-        llama_batch_size = int(self.config.get("llama_batch_size") or correction_batch_size or 40)
-        prompt_limit = int(self.config.get("lmstudio_prompt_token_limit") or 8192)
-        load_timeout = int(self.config.get("lmstudio_load_timeout") or 600)
-        poll_interval = float(self.config.get("lmstudio_poll_interval") or 1.5)
-        processing_settings = ProcessingSettings(
-            pipeline_mode=self.config.get("parallel_mode") or "balanced",
-            correction_batch_size=correction_batch_size,
-            release_whisper_after_batch=bool(self.config.get("release_whisper_after_batch")),
-            deep_correction=bool(self.config.get("deep_correction_enabled")),
-            llama_n_ctx=int(self.config.get("llama_n_ctx") or 4096),
-            llama_batch_size=llama_batch_size,
-            llama_gpu_layers=int(self.config.get("llama_gpu_layers") or 0),
-            llama_main_gpu=int(self.config.get("llama_main_gpu") or 0),
-            enable_cudnn_benchmark=bool(self.config.get("enable_cudnn_benchmark")),
-            use_lmstudio=bool(self.config.get("lmstudio_enabled")),
-            lmstudio_base_url=self.config.get("lmstudio_base_url") or "",
-            lmstudio_model=self.config.get("lmstudio_model") or "",
-            lmstudio_api_key=self.config.get("lmstudio_api_key") or "",
-            lmstudio_batch_size=int(self.config.get("lmstudio_batch_size") or correction_batch_size),
-            lmstudio_prompt_token_limit=prompt_limit,
-            lmstudio_load_timeout=load_timeout,
-            lmstudio_poll_interval=poll_interval,
-        )
-        self.worker.update_processing_settings(processing_settings)
         self.worker.resume_processing()
-        self._post_action_triggered = False
-
-        selected_formats = list(self.config.get("output_formats_multi") or ["srt"])
-        if not selected_formats:
-            selected_formats = ["srt"]
-
-        for task_id, task in self.tasks.items():
-            if task.status == "pending":
-                configured_output = self.config.get("output_dir")
-                if getattr(task, "use_source_dir_as_output", False):
-                    task.output_dir = task.video_path.parent
-                elif configured_output:
-                    task.output_dir = Path(configured_output)
-                else:
-                    task.output_dir = task.video_path.parent
-                task.output_format = "txt" if selected_formats[0].startswith("txt") else selected_formats[0]
-                task.language = self.config.get("language")
-                task.model_size = self.config.get("model_size")
-                task.device = self.config.get("device")
-                backend = (self.config.get("whisper_backend") or "faster").strip().lower()
-                if backend not in {"faster", "openai"}:
-                    backend = "faster"
-                task.whisper_backend = backend
-                task.faster_whisper_compute_type = self.config.get("faster_whisper_compute_type") or "int8"
-                task.use_local_llm_correction = bool(self.config.get("use_local_llm_correction"))
-                task.deep_correction = bool(self.config.get("deep_correction_enabled"))
-                task.use_lmstudio = bool(self.config.get("lmstudio_enabled"))
-                task.lmstudio_base_url = self.config.get("lmstudio_base_url") or ""
-                task.lmstudio_model = self.config.get("lmstudio_model") or ""
-                task.lmstudio_api_key = self.config.get("lmstudio_api_key") or ""
-                task.lmstudio_batch_size = int(self.config.get("lmstudio_batch_size") or correction_batch_size)
-                task.lmstudio_prompt_token_limit = prompt_limit
-                task.lmstudio_load_timeout = load_timeout
-                task.lmstudio_poll_interval = poll_interval
-                task.pipeline_mode = processing_settings.pipeline_mode
-                task.outputs = [
-                    OutputRequest(format=fmt, include_timestamps=fmt in {"txt_ts", "txt_timestamps"})
-                    for fmt in selected_formats
-                ]
-                task.include_timestamps = any(req.include_timestamps for req in task.outputs)
+        
+        count = 0
+        for task in queued:
+            # Reset status if needed
+            if task.status in ("pending", "failed"):
+                task.status = "queued"
                 task.error = None
                 task.progress = 0
-                task.status = "queued"
-                task.result_paths = []
-                if task_id in self.task_widgets:
-                    self.task_widgets[task_id].update_progress(0)
-                self.worker.add_task(task)
-        self.log_message("info", f"Запущена обработка {len(self.tasks)} задач.")
+                if task.task_id in self.task_widgets:
+                    self.task_widgets[task.task_id].update_progress(0)
+                    self.task_widgets[task.task_id].set_error("")
+            
+            # Add to worker queue (since queue is cleared on stop)
+            self.worker.add_task(task)
+            count += 1
+            
+        self.log_message("info", f"Начало обработки... ({count} задач)")
     def stop_processing(self):
         self.log_message("warning", "Обработка всех задач остановлена.")
         self.worker.stop_processing()

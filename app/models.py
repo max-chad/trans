@@ -44,6 +44,8 @@ class TranscriptionTask:
     staged_transcript_path: Optional[Path] = None
     source_root: Optional[Path] = None
     use_source_dir_as_output: bool = False
+    enable_diarization: bool = False
+    num_speakers: Optional[int] = None
 
 
 @dataclass
