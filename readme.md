@@ -9,7 +9,8 @@ Whisper, and LM Studio for quality improvements.
 - CLI wrapper around the same worker pipeline for batch automation
 - Whisper / Faster-Whisper transcription with selectable models and backends
 - Optional LM Studio powered correction and translation steps
-- Speaker diarization hooks (PyAnnote) and multi-format exports (SRT / TXT)
+- Speaker diarization (SpeechBrain) with GUI toggles for on/off and device selection, plus multi-format exports (SRT / TXT)
+- Diarization now prefers GPU when available (set dropdown or `DIARIZATION_DEVICE=cuda` to force)
 
 ## Requirements
 - Python 3.11 or newer (PyPI CUDA wheels target Python 3.12)

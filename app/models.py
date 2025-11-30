@@ -46,6 +46,7 @@ class TranscriptionTask:
     use_source_dir_as_output: bool = False
     enable_diarization: bool = False
     num_speakers: Optional[int] = None
+    diarization_device: str = "auto"
 
 
 @dataclass
@@ -74,3 +75,4 @@ class ProcessingSettings:
     lmstudio_prompt_token_limit: int = 8192
     lmstudio_load_timeout: float = 600.0
     lmstudio_poll_interval: float = 1.5
+    diarization_device: str = "auto"

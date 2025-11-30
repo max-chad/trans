@@ -36,6 +36,8 @@ class MainWindow(QMainWindow):
         self.worker.task_failed.connect(self.on_task_failed)
         self.worker.log_message.connect(self.log_message)
         self.worker.start()
+        # Pause processing until the user explicitly clicks "start".
+        self.worker.stop_processing()
         self.translator = TranslationWorker()
         self.translator.translation_completed.connect(self.on_translation_completed)
         self.translator.translation_failed.connect(self.on_translation_failed)
@@ -45,6 +47,7 @@ class MainWindow(QMainWindow):
         self.load_settings()
         self._apply_gpu_defaults()
         self._post_action_triggered = False
+        self._processing_active = False
 
     def init_ui(self):
         self.setWindowTitle("Video Transcriber")
@@ -328,29 +331,49 @@ class MainWindow(QMainWindow):
         self.pipeline_mode_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
         advanced_layout.addWidget(self.pipeline_mode_combo, 0, 1, 1, 2)
 
-        advanced_layout.addWidget(QLabel("Строк за вызов LLM:"), 3, 0)
+        advanced_layout.addWidget(QLabel("Diarization:"), 1, 0)
+        self.diarization_enabled_checkbox = QCheckBox("Enable SpeechBrain (GPU/CPU)")
+        self.diarization_enabled_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
+        advanced_layout.addWidget(self.diarization_enabled_checkbox, 1, 1, 1, 3)
+
+        advanced_layout.addWidget(QLabel("Diarization device:"), 2, 0)
+        self.diarization_device_combo = QComboBox()
+        self.diarization_device_combo.addItem("Auto (prefer GPU)", "auto")
+        self.diarization_device_combo.addItem("GPU (CUDA)", "cuda")
+        self.diarization_device_combo.addItem("CPU", "cpu")
+        self.diarization_device_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
+        advanced_layout.addWidget(self.diarization_device_combo, 2, 1, 1, 2)
+
+        advanced_layout.addWidget(QLabel("Number of speakers (0 = auto):"), 3, 0)
+        self.diarization_speakers_spin = QSpinBox()
+        self.diarization_speakers_spin.setRange(0, 16)
+        self.diarization_speakers_spin.setValue(0)
+        self.diarization_speakers_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
+        advanced_layout.addWidget(self.diarization_speakers_spin, 3, 1)
+
+        advanced_layout.addWidget(QLabel("LLM batch size:"), 4, 0)
         self.correction_batch_spin = QSpinBox()
         self.correction_batch_spin.setRange(4, 200)
         self.correction_batch_spin.setValue(40)
         self.correction_batch_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.correction_batch_spin, 3, 1)
+        advanced_layout.addWidget(self.correction_batch_spin, 4, 1)
 
         self.deep_correction_checkbox = QCheckBox("Глубокая коррекция текста (замедляет обработку)")
         self.deep_correction_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
-        advanced_layout.addWidget(self.deep_correction_checkbox, 4, 0, 1, 4)
+        advanced_layout.addWidget(self.deep_correction_checkbox, 5, 0, 1, 4)
 
-        advanced_layout.addWidget(QLabel("Использовать LM Studio:"), 5, 0)
+        advanced_layout.addWidget(QLabel("LM Studio enabled:"), 6, 0)
         self.lmstudio_enabled_checkbox = QCheckBox("Включить LM Studio")
         self.lmstudio_enabled_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
-        advanced_layout.addWidget(self.lmstudio_enabled_checkbox, 5, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_enabled_checkbox, 6, 1, 1, 3)
 
-        advanced_layout.addWidget(QLabel("LM Studio URL:"), 6, 0)
+        advanced_layout.addWidget(QLabel("LM Studio URL:"), 7, 0)
         self.lmstudio_base_input = QLineEdit()
         self.lmstudio_base_input.setPlaceholderText("http://127.0.0.1:1234/v1")
         self.lmstudio_base_input.setStyleSheet(
             f"background-color: {AppTheme.PANELS}; border: 1px solid {AppTheme.BORDER}; border-radius: 8px; padding: 8px 12px;"
         )
-        advanced_layout.addWidget(self.lmstudio_base_input, 6, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_base_input, 7, 1, 1, 3)
 
         advanced_layout.addWidget(QLabel("Модель LM Studio:"), 7, 0)
         self.lmstudio_model_input = QLineEdit()
@@ -358,7 +381,7 @@ class MainWindow(QMainWindow):
         self.lmstudio_model_input.setStyleSheet(
             f"background-color: {AppTheme.PANELS}; border: 1px solid {AppTheme.BORDER}; border-radius: 8px; padding: 8px 12px;"
         )
-        advanced_layout.addWidget(self.lmstudio_model_input, 7, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_model_input, 8, 1, 1, 3)
 
         advanced_layout.addWidget(QLabel("API Key (если нужен):"), 8, 0)
         self.lmstudio_api_key_input = QLineEdit()
@@ -367,29 +390,29 @@ class MainWindow(QMainWindow):
         self.lmstudio_api_key_input.setStyleSheet(
             f"background-color: {AppTheme.PANELS}; border: 1px solid {AppTheme.BORDER}; border-radius: 8px; padding: 8px 12px;"
         )
-        advanced_layout.addWidget(self.lmstudio_api_key_input, 8, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_api_key_input, 9, 1, 1, 3)
 
         advanced_layout.addWidget(QLabel("Размер пакета LM Studio:"), 9, 0)
         self.lmstudio_batch_spin = QSpinBox()
         self.lmstudio_batch_spin.setRange(1, 200)
         self.lmstudio_batch_spin.setValue(40)
         self.lmstudio_batch_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_batch_spin, 9, 1)
+        advanced_layout.addWidget(self.lmstudio_batch_spin, 10, 1)
 
-        advanced_layout.addWidget(QLabel("LM Studio prompt token limit:"), 10, 0)
+        advanced_layout.addWidget(QLabel("LM Studio prompt token limit:"), 11, 0)
         self.lmstudio_prompt_tokens_spin = QSpinBox()
         self.lmstudio_prompt_tokens_spin.setRange(512, 131072)
         self.lmstudio_prompt_tokens_spin.setSingleStep(512)
         self.lmstudio_prompt_tokens_spin.setValue(8192)
         self.lmstudio_prompt_tokens_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_prompt_tokens_spin, 10, 1)
+        advanced_layout.addWidget(self.lmstudio_prompt_tokens_spin, 11, 1)
         advanced_layout.addWidget(QLabel("Таймаут загрузки LM Studio (сек):"), 11, 0)
         self.lmstudio_timeout_spin = QSpinBox()
         self.lmstudio_timeout_spin.setRange(60, 7200)
         self.lmstudio_timeout_spin.setSingleStep(30)
         self.lmstudio_timeout_spin.setValue(600)
         self.lmstudio_timeout_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_timeout_spin, 11, 1)
+        advanced_layout.addWidget(self.lmstudio_timeout_spin, 12, 1)
 
         advanced_layout.addWidget(QLabel("Интервал опроса LM Studio (сек):"), 12, 0)
         self.lmstudio_poll_spin = QDoubleSpinBox()
@@ -398,9 +421,9 @@ class MainWindow(QMainWindow):
         self.lmstudio_poll_spin.setValue(1.5)
         self.lmstudio_poll_spin.setDecimals(1)
         self.lmstudio_poll_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_poll_spin, 12, 1)
+        advanced_layout.addWidget(self.lmstudio_poll_spin, 13, 1)
 
-        advanced_layout.setRowStretch(15, 1)
+        advanced_layout.setRowStretch(16, 1)
         self.settings_tabs.addTab(advanced_tab, "Дополнительно")
 
         return controls_group
@@ -560,6 +583,19 @@ class MainWindow(QMainWindow):
         else:
             self.pipeline_mode_combo.setCurrentIndex(0)
 
+        self.diarization_enabled_checkbox.setChecked(bool(self.config.get("enable_diarization")))
+        diar_device = (self.config.get("diarization_device") or "auto").lower()
+        device_idx = self.diarization_device_combo.findData(diar_device)
+        if device_idx >= 0:
+            self.diarization_device_combo.setCurrentIndex(device_idx)
+        num_speakers = int(self.config.get("diarization_num_speakers") or 0)
+        num_speakers = max(self.diarization_speakers_spin.minimum(), min(num_speakers, self.diarization_speakers_spin.maximum()))
+        self.diarization_speakers_spin.setValue(num_speakers)
+        try:
+            self.worker.set_diarization_device(diar_device)
+        except Exception:
+            pass
+
         batch_size = int(
             self.config.get("correction_batch_size")
             or self.config.get("llama_batch_size")
@@ -624,6 +660,9 @@ class MainWindow(QMainWindow):
             self.config.set("include_txt_timestamps", primary_format in {"txt_ts", "txt_timestamps"})
 
         self.config.set("parallel_mode", self.pipeline_mode_combo.currentData())
+        self.config.set("enable_diarization", self.diarization_enabled_checkbox.isChecked())
+        self.config.set("diarization_device", self.diarization_device_combo.currentData())
+        self.config.set("diarization_num_speakers", int(self.diarization_speakers_spin.value()))
         self.config.set("correction_batch_size", self.correction_batch_spin.value())
         self.config.set("llama_batch_size", self.correction_batch_spin.value())
         self.config.set("lmstudio_batch_size", self.lmstudio_batch_spin.value())
@@ -632,6 +671,10 @@ class MainWindow(QMainWindow):
         self.config.set("lmstudio_poll_interval", float(self.lmstudio_poll_spin.value()))
         self.config.set("post_processing_action", self.post_action_combo.currentData())
         self.config.set("post_processing_notification_text", self.post_notification_input.text().strip())
+        try:
+            self.worker.set_diarization_device(self.diarization_device_combo.currentData())
+        except Exception:
+            pass
     def browse_files(self):
         files, _ = QFileDialog.getOpenFileNames(
             self,
@@ -686,10 +729,21 @@ class MainWindow(QMainWindow):
         load_timeout = int(self.config.get("lmstudio_load_timeout") or 600)
         poll_interval = float(self.config.get("lmstudio_poll_interval") or 1.5)
         pipeline_mode = self.config.get("parallel_mode") or "balanced"
+        enable_diarization = bool(self.config.get("enable_diarization"))
+        diarization_num_speakers = int(self.config.get("diarization_num_speakers") or 0)
+        diarization_device = (self.config.get("diarization_device") or "auto")
+        device_pref = (self.config.get("device") or "cpu").lower()
+        if device_pref not in {"cpu", "cuda", "hybrid", "auto"}:
+            device_pref = "cpu"
         
         selected_formats = list(self.config.get("output_formats_multi") or ["srt"])
         if not selected_formats:
             selected_formats = ["srt"]
+
+        try:
+            self.worker.set_diarization_device(diarization_device)
+        except Exception:
+            pass
 
         for path in file_paths:
             if path.is_dir():
@@ -710,8 +764,8 @@ class MainWindow(QMainWindow):
             if use_video_dir_as_output:
                 out_dir = resolved_path.parent
             elif self.config.get("output_mode") == "source":
-                 out_dir = resolved_path.parent
-            
+                out_dir = resolved_path.parent
+                
             task = TranscriptionTask(
                 task_id=task_id,
                 video_path=resolved_path,
@@ -722,6 +776,7 @@ class MainWindow(QMainWindow):
                 source_root=root
             )
             
+            task.device = device_pref
             task.whisper_backend = backend
             task.faster_whisper_compute_type = compute_type
             task.use_local_llm_correction = use_correction
@@ -735,6 +790,9 @@ class MainWindow(QMainWindow):
             task.lmstudio_load_timeout = load_timeout
             task.lmstudio_poll_interval = poll_interval
             task.pipeline_mode = pipeline_mode
+            task.enable_diarization = enable_diarization
+            task.num_speakers = diarization_num_speakers if diarization_num_speakers > 0 else None
+            task.diarization_device = diarization_device
             
             task.outputs = [
                 OutputRequest(format=fmt, include_timestamps=fmt in {"txt_ts", "txt_timestamps"})
@@ -743,7 +801,7 @@ class MainWindow(QMainWindow):
             task.include_timestamps = any(req.include_timestamps for req in task.outputs)
             task.error = None
             task.progress = 0
-            task.status = "queued"
+            task.status = "pending"
             task.result_paths = []
             
             self.tasks[task_id] = task
@@ -754,10 +812,11 @@ class MainWindow(QMainWindow):
             widget.translate_requested.connect(self.handle_translation_request)
             self.task_widgets[task_id] = widget
             self.tasks_layout.insertWidget(self.tasks_layout.count() - 1, widget)
+            if self._processing_active:
+                task.status = "queued"
+                self.worker.add_task(task)
             
-            self.worker.add_task(task)
-            
-        self.log_message("info", f"Запущена обработка {len(self.tasks)} задач.")
+        self.log_message("info", f"Добавлено в очередь {len(self.tasks)} задач.")
         self.check_all_tasks_done()
 
     def remove_task(self, task_id: str):
@@ -789,6 +848,7 @@ class MainWindow(QMainWindow):
              QMessageBox.information(self, "Info", "Все задачи уже выполнены.")
              return
 
+        self._processing_active = True
         self.process_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.worker.resume_processing()
@@ -811,6 +871,7 @@ class MainWindow(QMainWindow):
         self.log_message("info", f"Начало обработки... ({count} задач)")
     def stop_processing(self):
         self.log_message("warning", "Обработка всех задач остановлена.")
+        self._processing_active = False
         self.worker.stop_processing()
         for task in self.tasks.values():
             if task.status == "queued":
@@ -902,12 +963,14 @@ class MainWindow(QMainWindow):
         if not self.tasks:
             self.process_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
+            self._processing_active = False
             return
         if any(t.status == "queued" for t in self.tasks.values()):
             return
         if all(t.status in ["completed", "failed", "pending"] for t in self.tasks.values()):
             self.process_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
+            self._processing_active = False
             if not self._post_action_triggered and any(
                 t.status in ["completed", "failed"] for t in self.tasks.values()
             ):

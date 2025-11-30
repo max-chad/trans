@@ -96,6 +96,9 @@ class AppConfig:
             "lmstudio_prompt_token_limit": 8192,
             "lmstudio_load_timeout": 600,
             "lmstudio_poll_interval": 1.5,
+            "enable_diarization": False,
+            "diarization_num_speakers": 0,
+            "diarization_device": "auto",
         }
         self.settings = self.load_config()
 
@@ -219,6 +222,7 @@ class AppConfig:
             "lmstudio_load_timeout",
             "window_width",
             "window_height",
+            "diarization_num_speakers",
         }:
             try:
                 return int(self.settings.get(key, self.defaults.get(key, 0)))
@@ -235,6 +239,7 @@ class AppConfig:
             "lmstudio_enabled",
             "window_maximized",
             "deep_correction_enabled",
+            "enable_diarization",
         }:
             return bool(self.settings.get(key, self.defaults.get(key, False)))
         return self.settings.get(key, self.defaults.get(key))

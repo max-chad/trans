@@ -291,6 +291,10 @@ def transcribe_file(
     task.include_timestamps = timestamps_flag
     task.outputs = requests
     task.pipeline_mode = settings.pipeline_mode
+    task.enable_diarization = bool(config.get("enable_diarization"))
+    diarization_speakers = int(config.get("diarization_num_speakers") or 0)
+    task.num_speakers = diarization_speakers if diarization_speakers > 0 else None
+    task.diarization_device = str(config.get("diarization_device") or settings.diarization_device or "auto")
     task.use_lmstudio = settings.use_lmstudio and task.use_local_llm_correction
     task.lmstudio_base_url = settings.lmstudio_base_url
     task.lmstudio_model = settings.lmstudio_model
@@ -373,6 +377,7 @@ def _build_processing_settings(config: AppConfig) -> ProcessingSettings:
         lmstudio_prompt_token_limit=int(config.get("lmstudio_prompt_token_limit") or 8192),
         lmstudio_load_timeout=float(config.get("lmstudio_load_timeout") or 600),
         lmstudio_poll_interval=float(config.get("lmstudio_poll_interval") or 1.5),
+        diarization_device=str(config.get("diarization_device") or "auto"),
     )
 
 

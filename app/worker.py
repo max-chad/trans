@@ -104,7 +104,9 @@ class TranscriptionWorker(QThread):
         self._staged_corrections: List[TranscriptionTask] = []
         self._in_correction_phase = False
         self._active_transcriptions = 0
-        self.diarization = DiarizationService(device="cuda" if torch.cuda.is_available() else "cpu")
+        diar_device = os.getenv("DIARIZATION_DEVICE", "auto")
+        self._diarization_device = diar_device
+        self.diarization = DiarizationService(device=diar_device)
 
     # Обновляем параметры обработки и при необходимости запускаем или завершаем фазу корректировки.
     def update_processing_settings(self, settings: ProcessingSettings):
@@ -117,6 +119,8 @@ class TranscriptionWorker(QThread):
                 pending_flush = list(self._staged_corrections)
                 self._staged_corrections.clear()
                 self._in_correction_phase = False
+            if getattr(settings, "diarization_device", None):
+                self.set_diarization_device(settings.diarization_device)
         if pending_flush:
             for task in pending_flush:
                 self._dispatch_correction(task)
@@ -179,6 +183,12 @@ class TranscriptionWorker(QThread):
         for context in self._contexts.values():
             self._release_context_model(context)
 
+    def set_diarization_device(self, device: str):
+        """Recreate diarization service on the desired device."""
+        resolved = device or "auto"
+        self._diarization_device = resolved
+        self.diarization = DiarizationService(device=resolved)
+
     # Загружаем пайплайн diarization от pyannote и кэшируем его для повторного использования.
     @staticmethod
     # Объединяем соседние сегменты с одинаковым говорящим в один блок.
@@ -212,7 +222,10 @@ class TranscriptionWorker(QThread):
         audio_path: Optional[Path],
         segments: List[dict],
     ) -> List[dict]:
-        if not task.enable_diarization or not audio_path or not audio_path.exists():
+        if not task.enable_diarization:
+            self.log_message.emit("info", "Speaker diarization is disabled for this task.")
+            return segments
+        if not audio_path or not audio_path.exists():
             return segments
         
         self.log_message.emit("info", f"Starting speaker diarization for {task.video_path.name}...")
