@@ -1,7 +1,20 @@
 import sys
+import warnings
 from pathlib import Path
 
 from app.config import AppConfig, DEFAULT_CONFIG_PATH
+
+# Suppress noisy TF32 deprecation warnings from torch on import.
+warnings.filterwarnings(
+    "ignore",
+    message="Please use the new API settings to control TF32 behavior.*",
+    module="torch.backends",
+)
+warnings.filterwarnings(
+    "ignore",
+    message="`torch.cuda.amp.custom_fwd\\(args\\.\\.\\.\\)` is deprecated.*",
+    module="speechbrain.utils.autocast",
+)
 
 
 def launch_gui(config_path: Path | None = None) -> int:

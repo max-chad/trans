@@ -1,4 +1,6 @@
 import logging
+import os
+import shutil
 import numpy as np
 import torch
 import torchaudio
@@ -6,17 +8,59 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from sklearn.cluster import AgglomerativeClustering
 
+# SpeechBrain (1.0.3) still expects torchaudio.list_audio_backends, which was
+# removed in torchaudio 2.9+. Provide a tiny compatibility shim so the import
+# doesn't explode on newer torchaudio builds.
+if not hasattr(torchaudio, "list_audio_backends"):
+    def _list_audio_backends() -> list[str]:
+        try:
+            import soundfile  # noqa: F401
+            return ["soundfile"]
+        except Exception:
+            return []
+
+    torchaudio.list_audio_backends = _list_audio_backends  # type: ignore[attr-defined]
+
+if not hasattr(torchaudio, "set_audio_backend"):
+    def _set_audio_backend(backend: str | None) -> None:  # noqa: ARG001
+        return None
+
+    torchaudio.set_audio_backend = _set_audio_backend  # type: ignore[attr-defined]
+
 try:
-    from speechbrain.inference.speakers import EncoderClassifier
+    try:
+        # Newer SpeechBrain packages expose EncoderClassifier under speaker.py
+        from speechbrain.inference.speaker import EncoderClassifier
+    except ImportError:
+        # Older versions used speakers.py
+        from speechbrain.inference.speakers import EncoderClassifier
+    from speechbrain.utils.fetching import LocalStrategy
     SPEECHBRAIN_AVAILABLE = True
-except (ImportError, AttributeError) as e:
+    SPEECHBRAIN_ERROR = None
+except (ImportError, AttributeError, OSError) as e:
     SPEECHBRAIN_AVAILABLE = False
     SPEECHBRAIN_ERROR = str(e)
     EncoderClassifier = None
+    LocalStrategy = None
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class DiarizationService:
     TARGET_SAMPLE_RATE = 16000
+    MODEL_ID = "speechbrain/spkrec-ecapa-voxceleb"
+    REQUIRED_FILES = [
+        "hyperparams.yaml",
+        "embedding_model.ckpt",
+        "mean_var_norm_emb.ckpt",
+        "classifier.ckpt",
+    ]
+    OPTIONAL_LABEL_FILES = ["label_encoder.ckpt", "label_encoder.txt"]
 
     def __init__(self, device: str = "auto"):
         """
@@ -29,6 +73,10 @@ class DiarizationService:
         self.classifier = None
         self._model_device: Optional[str] = None
         self._resamplers: Dict[Tuple[int, int, str], torchaudio.transforms.Resample] = {}
+        # Allow download by default; set SPEECHBRAIN_ALLOW_DOWNLOAD=0 to force offline.
+        self.offline = not _env_flag("SPEECHBRAIN_ALLOW_DOWNLOAD", True)
+        self.repo_root = Path(__file__).resolve().parent.parent
+        self.savedir = self.repo_root / "pretrained_models" / "spkrec-ecapa-voxceleb"
 
     def _resolve_device(self, requested: str) -> str:
         if requested == "auto":
@@ -44,22 +92,68 @@ class DiarizationService:
 
         if self.classifier is not None:
             return
-        
+
         try:
             # Re-resolve in case hardware availability changed between init and load.
             self.device = self._resolve_device(self.requested_device)
-            # Use a local directory for the model to avoid re-downloading if possible,
-            # though SpeechBrain handles caching in ~/.cache/speechbrain by default.
+            # Force HF Hub to avoid symlinks on Windows and prefer fully local use.
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+            os.environ.setdefault("HF_HUB_OFFLINE", "1" if self.offline else "0")
+
+            hf_home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
+            os.environ.setdefault("HF_HOME", str(hf_home))
+            self.savedir.mkdir(parents=True, exist_ok=True)
+
+            if not self._has_local_model():
+                copied = self._copy_from_hf_cache(Path(hf_home))
+                if not copied or not self._has_local_model():
+                    if self.offline:
+                        raise FileNotFoundError(
+                            f"SpeechBrain model not found locally at {self.savedir}. "
+                            "Download the contents of speechbrain/spkrec-ecapa-voxceleb manually into this folder "
+                            "or set SPEECHBRAIN_ALLOW_DOWNLOAD=1 to permit fetching."
+                        )
+
             # We use the 'spkrec-ecapa-voxceleb' model which is small and effective.
-            self.classifier = EncoderClassifier.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir="pretrained_models/spkrec-ecapa-voxceleb",
-                run_opts={"device": self.device}
-            )
+            kwargs = {
+                "source": self.MODEL_ID,
+                "savedir": str(self.savedir),
+                "run_opts": {"device": self.device},
+                "huggingface_cache_dir": str(hf_home),
+            }
+            if LocalStrategy is not None:
+                kwargs["local_strategy"] = LocalStrategy.COPY
+            self.classifier = EncoderClassifier.from_hparams(**kwargs)
             self._model_device = self.device
         except Exception as e:
             self.logger.error(f"Failed to load SpeechBrain model: {e}")
             raise
+
+    def _has_local_model(self) -> bool:
+        core_ok = all((self.savedir / name).exists() for name in self.REQUIRED_FILES)
+        label_ok = any((self.savedir / name).exists() for name in self.OPTIONAL_LABEL_FILES)
+        return core_ok and label_ok
+
+    def _copy_from_hf_cache(self, hf_home: Path) -> bool:
+        """Try to copy an existing HF cache snapshot into savedir to avoid symlink use."""
+        cache_root = hf_home / "hub" / f"models--{self.MODEL_ID.replace('/', '--')}" / "snapshots"
+        if not cache_root.exists():
+            return False
+
+        snapshots = sorted(
+            (p for p in cache_root.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for snapshot in snapshots:
+            try:
+                self.logger.info(f"Copying SpeechBrain model snapshot from HF cache: {snapshot}")
+                shutil.copytree(snapshot, self.savedir, dirs_exist_ok=True)
+                return True
+            except Exception as copy_err:
+                self.logger.warning(f"Failed to copy SpeechBrain snapshot {snapshot}: {copy_err}")
+        return False
 
     def _get_resampler(self, sample_rate: int) -> torchaudio.transforms.Resample:
         """

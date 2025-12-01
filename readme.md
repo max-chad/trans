@@ -12,6 +12,10 @@ Whisper, and LM Studio for quality improvements.
 - Speaker diarization (SpeechBrain) with GUI toggles for on/off and device selection, plus multi-format exports (SRT / TXT)
 - Diarization now prefers GPU when available (set dropdown or `DIARIZATION_DEVICE=cuda` to force)
 
+### Speaker diarization model
+- The SpeechBrain model files live in `pretrained_models/spkrec-ecapa-voxceleb`. By default the app will download them automatically (copying from the Hugging Face cache, no symlinks).
+- If you want a strict offline mode, set `SPEECHBRAIN_ALLOW_DOWNLOAD=0` and place the files manually into that folder.
+
 ## Requirements
 - Python 3.11 or newer (PyPI CUDA wheels target Python 3.12)
 - Windows with CUDA 12+ drivers for GPU acceleration (CPU-only mode also supported)
