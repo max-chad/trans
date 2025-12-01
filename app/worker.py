@@ -25,6 +25,7 @@ from .audio import (
 )
 from .device import DeviceContext, configure_cuda_dll_search_path
 from .diarization import DiarizationService
+from .gpu_detection import get_optimal_compute_type
 
 # Добавляем CUDA-библиотеки в системные пути, чтобы Whisper мог работать на GPU в Windows.
 
@@ -720,7 +721,12 @@ class TranscriptionWorker(QThread):
     # Гарантируем, что нужная модель загружена в контекст; при несоответствии переинициализируем.
     def _ensure_model_for_context(self, context: DeviceContext, backend: str, size: str, compute_type: str) -> bool:
         desired_backend = (backend or "openai").lower()
-        normalized_compute = (compute_type or "int8").lower()
+        normalized_compute = (compute_type or "auto").lower()
+        
+        if desired_backend == "faster" and normalized_compute == "auto":
+            normalized_compute = get_optimal_compute_type()
+            self.log_message.emit("info", f"Auto-selected compute type: {normalized_compute}")
+
         current_backend = (context.backend or "").lower()
         if (
             context.model is not None

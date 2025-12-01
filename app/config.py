@@ -74,7 +74,7 @@ class AppConfig:
             "use_local_llm_translation": True,
             "local_llm_model_path": "",
             "whisper_backend": "faster",
-            "faster_whisper_compute_type": "int8",
+            "faster_whisper_compute_type": "auto",
             "include_txt_timestamps": False,
             "post_processing_action": "none",
             "post_processing_notification_text": "Processing complete",
@@ -161,6 +161,12 @@ class AppConfig:
         backend = (migrated.get("whisper_backend") or "").strip().lower()
         if backend in {"", "openai"}:
             migrated["whisper_backend"] = "faster"
+            
+        # Migrate legacy "int8" compute type to "auto" to enable GPU optimization
+        compute_type = (migrated.get("faster_whisper_compute_type") or "").strip().lower()
+        if compute_type == "int8":
+            migrated["faster_whisper_compute_type"] = "auto"
+            
         return migrated
 
     def load_config(self) -> Dict[str, Any]:

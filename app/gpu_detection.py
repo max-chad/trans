@@ -152,3 +152,29 @@ def detect_supported_nvidia_gpus() -> GPUDetectionResult:
         matched_names=matched_names,
         torch_usable=torch_usable,
     )
+
+
+def get_optimal_compute_type() -> str:
+    """
+    Определяет оптимальный тип вычислений (precision) для текущего GPU.
+    
+    Returns:
+        str: "float16" для современных GPU (Turing, Ampere, Ada, Hopper и новее, CC >= 7.0),
+             "int8" для старых GPU (Pascal и старее, CC < 7.0) или если GPU не найден.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return "int8"
+        
+        # Берем первое доступное устройство
+        major, _ = torch.cuda.get_device_capability(0)
+        
+        # Compute Capability 7.0+ (Volta, Turing, Ampere, Ada, Hopper) поддерживают эффективный FP16
+        if major >= 7:
+            return "float16"
+        
+        # Для Pascal (6.x) и старее лучше использовать int8, так как FP16 может быть медленным
+        return "int8"
+    except Exception:
+        return "int8"

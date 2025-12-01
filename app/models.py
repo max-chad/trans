@@ -27,7 +27,7 @@ class TranscriptionTask:
     use_local_llm_correction: bool = True
     local_llm_model_path: str = ""
     whisper_backend: str = "faster"
-    faster_whisper_compute_type: str = "int8"
+    faster_whisper_compute_type: str = "auto"
     backend_fallback_attempted: bool = False
     deep_correction: bool = False
     include_timestamps: bool = False
