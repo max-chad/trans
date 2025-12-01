@@ -275,8 +275,20 @@ class MainWindow(QMainWindow):
         self.model_combo.addItems(["tiny", "base", "small", "medium", "large"])
         self.model_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
         basic_layout.addWidget(self.model_combo, 3, 1, 1, 2)
+        
+        basic_layout.addWidget(QLabel("Точность вычислений:"), 4, 0)
+        self.compute_type_combo = QComboBox()
+        self.compute_type_combo.addItem("Auto", "auto")
+        self.compute_type_combo.addItem("FP16 (Half)", "float16")
+        self.compute_type_combo.addItem("FP32 (Full)", "float32")
+        self.compute_type_combo.addItem("INT8_FP16 (Mixed)", "int8_float16")
+        self.compute_type_combo.addItem("INT8 (Quantized)", "int8")
+        self.compute_type_combo.addItem("INT8_BFLOAT16", "int8_bfloat16")
+        self.compute_type_combo.addItem("BFLOAT16", "bfloat16")
+        self.compute_type_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
+        basic_layout.addWidget(self.compute_type_combo, 4, 1, 1, 2)
 
-        basic_layout.addWidget(QLabel("Устройство инференса:"), 4, 0)
+        basic_layout.addWidget(QLabel("Устройство инференса:"), 5, 0)
         self.device_group = QButtonGroup()
         device_layout = QHBoxLayout()
         self.cpu_radio = QRadioButton("CPU")
@@ -293,9 +305,9 @@ class MainWindow(QMainWindow):
         device_layout.addWidget(self.cpu_radio)
         device_layout.addWidget(self.gpu_radio)
         device_layout.addWidget(self.hybrid_radio)
-        basic_layout.addLayout(device_layout, 4, 1, 1, 2)
+        basic_layout.addLayout(device_layout, 5, 1, 1, 2)
 
-        basic_layout.addWidget(QLabel("Форматы субтитров:"), 5, 0)
+        basic_layout.addWidget(QLabel("Форматы субтитров:"), 6, 0)
         formats_layout = QGridLayout()
         self.output_format_checks = {
             "srt": QCheckBox("SRT"),
@@ -308,46 +320,46 @@ class MainWindow(QMainWindow):
             row = idx // 2
             col = idx % 2
             formats_layout.addWidget(checkbox, row, col)
-        basic_layout.addLayout(formats_layout, 5, 1, 1, 2)
+        basic_layout.addLayout(formats_layout, 6, 1, 1, 2)
 
-        basic_layout.addWidget(QLabel("Язык перевода:"), 6, 0)
+        basic_layout.addWidget(QLabel("Язык перевода:"), 7, 0)
         self.translate_lang_combo = QComboBox()
         self.translate_lang_combo.addItems(["en", "ru", "de", "fr", "es", "it", "uk", "pl"])
         self.translate_lang_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        basic_layout.addWidget(self.translate_lang_combo, 6, 1, 1, 2)
+        basic_layout.addWidget(self.translate_lang_combo, 7, 1, 1, 2)
 
-        # Row 7: Processing Mode
-        basic_layout.addWidget(QLabel("Режим обработки:"), 7, 0)
+        # Row 8: Processing Mode
+        basic_layout.addWidget(QLabel("Режим обработки:"), 8, 0)
         self.pipeline_mode_combo = QComboBox()
         self.pipeline_mode_combo.addItem("Последовательно", "serial")
         self.pipeline_mode_combo.addItem("Пайплайн (GPU + CPU)", "balanced")
         self.pipeline_mode_combo.addItem("Transcribe then Correct (staged)", "staged")
         self.pipeline_mode_combo.addItem("Полностью на GPU (8 ГБ)", "full_gpu")
         self.pipeline_mode_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        basic_layout.addWidget(self.pipeline_mode_combo, 7, 1, 1, 2)
+        basic_layout.addWidget(self.pipeline_mode_combo, 8, 1, 1, 2)
 
-        # Row 8: Diarization Enable
-        basic_layout.addWidget(QLabel("Diarization:"), 8, 0)
+        # Row 9: Diarization Enable
+        basic_layout.addWidget(QLabel("Diarization:"), 9, 0)
         self.diarization_enabled_checkbox = QCheckBox("Enable SpeechBrain (GPU/CPU)")
         self.diarization_enabled_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
-        basic_layout.addWidget(self.diarization_enabled_checkbox, 8, 1, 1, 2)
+        basic_layout.addWidget(self.diarization_enabled_checkbox, 9, 1, 1, 2)
 
-        # Row 9: Diarization Device
-        basic_layout.addWidget(QLabel("Diarization device:"), 9, 0)
+        # Row 10: Diarization Device
+        basic_layout.addWidget(QLabel("Diarization device:"), 10, 0)
         self.diarization_device_combo = QComboBox()
         self.diarization_device_combo.addItem("Auto (prefer GPU)", "auto")
         self.diarization_device_combo.addItem("GPU (CUDA)", "cuda")
         self.diarization_device_combo.addItem("CPU", "cpu")
         self.diarization_device_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
-        basic_layout.addWidget(self.diarization_device_combo, 9, 1, 1, 2)
+        basic_layout.addWidget(self.diarization_device_combo, 10, 1, 1, 2)
 
-        # Row 10: Number of speakers
-        basic_layout.addWidget(QLabel("Number of speakers (0 = auto):"), 10, 0)
+        # Row 11: Number of speakers
+        basic_layout.addWidget(QLabel("Number of speakers (0 = auto):"), 11, 0)
         self.diarization_speakers_spin = QSpinBox()
         self.diarization_speakers_spin.setRange(0, 16)
         self.diarization_speakers_spin.setValue(0)
         self.diarization_speakers_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        basic_layout.addWidget(self.diarization_speakers_spin, 10, 1)
+        basic_layout.addWidget(self.diarization_speakers_spin, 11, 1)
 
         basic_layout.setRowStretch(11, 1)
         self.settings_tabs.addTab(basic_tab, "Основные")
@@ -362,73 +374,85 @@ class MainWindow(QMainWindow):
         self.correction_batch_spin.setValue(40)
         self.correction_batch_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
         advanced_layout.addWidget(self.correction_batch_spin, 0, 1)
+        
+        advanced_layout.addWidget(QLabel("Batched Inference (Faster-Whisper):"), 1, 0)
+        self.batched_inference_checkbox = QCheckBox("Enable Batched Inference")
+        self.batched_inference_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
+        advanced_layout.addWidget(self.batched_inference_checkbox, 1, 1)
+        
+        advanced_layout.addWidget(QLabel("Inference Batch Size:"), 2, 0)
+        self.batched_inference_batch_spin = QSpinBox()
+        self.batched_inference_batch_spin.setRange(1, 128)
+        self.batched_inference_batch_spin.setValue(16)
+        self.batched_inference_batch_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
+        advanced_layout.addWidget(self.batched_inference_batch_spin, 2, 1)
 
         self.deep_correction_checkbox = QCheckBox("Глубокая коррекция текста (замедляет обработку)")
         self.deep_correction_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
-        advanced_layout.addWidget(self.deep_correction_checkbox, 1, 0, 1, 4)
+        advanced_layout.addWidget(self.deep_correction_checkbox, 3, 0, 1, 4)
 
-        advanced_layout.addWidget(QLabel("LM Studio enabled:"), 2, 0)
+        advanced_layout.addWidget(QLabel("LM Studio enabled:"), 4, 0)
         self.lmstudio_enabled_checkbox = QCheckBox("Включить LM Studio")
         self.lmstudio_enabled_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
-        advanced_layout.addWidget(self.lmstudio_enabled_checkbox, 2, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_enabled_checkbox, 4, 1, 1, 3)
 
-        advanced_layout.addWidget(QLabel("LM Studio URL:"), 3, 0)
+        advanced_layout.addWidget(QLabel("LM Studio URL:"), 5, 0)
         self.lmstudio_base_input = QLineEdit()
         self.lmstudio_base_input.setPlaceholderText("http://127.0.0.1:1234/v1")
         self.lmstudio_base_input.setStyleSheet(
             f"background-color: {AppTheme.PANELS}; border: 1px solid {AppTheme.BORDER}; border-radius: 8px; padding: 8px 12px;"
         )
-        advanced_layout.addWidget(self.lmstudio_base_input, 3, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_base_input, 5, 1, 1, 3)
 
-        advanced_layout.addWidget(QLabel("Модель LM Studio:"), 4, 0)
+        advanced_layout.addWidget(QLabel("Модель LM Studio:"), 6, 0)
         self.lmstudio_model_input = QLineEdit()
         self.lmstudio_model_input.setPlaceholderText("google/gemma-3n-e4b")
         self.lmstudio_model_input.setStyleSheet(
             f"background-color: {AppTheme.PANELS}; border: 1px solid {AppTheme.BORDER}; border-radius: 8px; padding: 8px 12px;"
         )
-        advanced_layout.addWidget(self.lmstudio_model_input, 4, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_model_input, 6, 1, 1, 3)
 
-        advanced_layout.addWidget(QLabel("API Key (если нужен):"), 5, 0)
+        advanced_layout.addWidget(QLabel("API Key (если нужен):"), 7, 0)
         self.lmstudio_api_key_input = QLineEdit()
         self.lmstudio_api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.lmstudio_api_key_input.setPlaceholderText("Необязательно")
         self.lmstudio_api_key_input.setStyleSheet(
             f"background-color: {AppTheme.PANELS}; border: 1px solid {AppTheme.BORDER}; border-radius: 8px; padding: 8px 12px;"
         )
-        advanced_layout.addWidget(self.lmstudio_api_key_input, 5, 1, 1, 3)
+        advanced_layout.addWidget(self.lmstudio_api_key_input, 7, 1, 1, 3)
 
-        advanced_layout.addWidget(QLabel("Размер пакета LM Studio:"), 6, 0)
+        advanced_layout.addWidget(QLabel("Размер пакета LM Studio:"), 8, 0)
         self.lmstudio_batch_spin = QSpinBox()
         self.lmstudio_batch_spin.setRange(1, 200)
         self.lmstudio_batch_spin.setValue(40)
         self.lmstudio_batch_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_batch_spin, 6, 1)
+        advanced_layout.addWidget(self.lmstudio_batch_spin, 8, 1)
 
-        advanced_layout.addWidget(QLabel("LM Studio prompt token limit:"), 7, 0)
+        advanced_layout.addWidget(QLabel("LM Studio prompt token limit:"), 9, 0)
         self.lmstudio_prompt_tokens_spin = QSpinBox()
         self.lmstudio_prompt_tokens_spin.setRange(512, 131072)
         self.lmstudio_prompt_tokens_spin.setSingleStep(512)
         self.lmstudio_prompt_tokens_spin.setValue(8192)
         self.lmstudio_prompt_tokens_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_prompt_tokens_spin, 7, 1)
-        advanced_layout.addWidget(QLabel("Таймаут загрузки LM Studio (сек):"), 8, 0)
+        advanced_layout.addWidget(self.lmstudio_prompt_tokens_spin, 9, 1)
+        advanced_layout.addWidget(QLabel("Таймаут загрузки LM Studio (сек):"), 10, 0)
         self.lmstudio_timeout_spin = QSpinBox()
         self.lmstudio_timeout_spin.setRange(60, 7200)
         self.lmstudio_timeout_spin.setSingleStep(30)
         self.lmstudio_timeout_spin.setValue(600)
         self.lmstudio_timeout_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_timeout_spin, 8, 1)
+        advanced_layout.addWidget(self.lmstudio_timeout_spin, 10, 1)
 
-        advanced_layout.addWidget(QLabel("Интервал опроса LM Studio (сек):"), 9, 0)
+        advanced_layout.addWidget(QLabel("Интервал опроса LM Studio (сек):"), 11, 0)
         self.lmstudio_poll_spin = QDoubleSpinBox()
         self.lmstudio_poll_spin.setRange(0.5, 15.0)
         self.lmstudio_poll_spin.setSingleStep(0.5)
         self.lmstudio_poll_spin.setValue(1.5)
         self.lmstudio_poll_spin.setDecimals(1)
         self.lmstudio_poll_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
-        advanced_layout.addWidget(self.lmstudio_poll_spin, 9, 1)
+        advanced_layout.addWidget(self.lmstudio_poll_spin, 11, 1)
 
-        advanced_layout.setRowStretch(10, 1)
+        advanced_layout.setRowStretch(12, 1)
         self.settings_tabs.addTab(advanced_tab, "Дополнительно")
 
         return controls_group
@@ -543,9 +567,21 @@ class MainWindow(QMainWindow):
         self.output_label.setText(self.config.get("output_dir"))
         self._update_output_controls()
         self.model_combo.setCurrentText(self.config.get("model_size"))
+        
+        compute_type = self.config.get("faster_whisper_compute_type") or "float16"
+        idx = self.compute_type_combo.findData(compute_type)
+        if idx >= 0:
+            self.compute_type_combo.setCurrentIndex(idx)
+        else:
+            self.compute_type_combo.setCurrentIndex(1) # Default to float16
+            
         self.lang_combo.setCurrentText(self.config.get("language"))
         self.translate_lang_combo.setCurrentText(self.config.get("translate_lang") or "en")
         self.deep_correction_checkbox.setChecked(bool(self.config.get("deep_correction_enabled")))
+        
+        self.batched_inference_checkbox.setChecked(bool(self.config.get("batched_inference_enabled")))
+        self.batched_inference_batch_spin.setValue(int(self.config.get("batched_inference_batch_size") or 16))
+        
         self.lmstudio_enabled_checkbox.setChecked(bool(self.config.get("lmstudio_enabled")))
         self.lmstudio_base_input.setText(self.config.get("lmstudio_base_url") or "")
         self.lmstudio_model_input.setText(self.config.get("lmstudio_model") or "")
@@ -637,7 +673,9 @@ class MainWindow(QMainWindow):
             self.config.set("left_splitter_sizes", self.left_splitter.sizes())
         self.config.set("output_mode", self.output_mode_combo.currentData())
         self.config.set("output_dir", self.output_label.text())
+        self.config.set("output_dir", self.output_label.text())
         self.config.set("model_size", self.model_combo.currentText())
+        self.config.set("faster_whisper_compute_type", self.compute_type_combo.currentData())
         self.config.set("language", self.lang_combo.currentText())
         self.config.set("translate_lang", self.translate_lang_combo.currentText())
         if self.hybrid_radio.isChecked():
@@ -647,6 +685,8 @@ class MainWindow(QMainWindow):
         else:
             self.config.set("device", "cpu")
         self.config.set("deep_correction_enabled", self.deep_correction_checkbox.isChecked())
+        self.config.set("batched_inference_enabled", self.batched_inference_checkbox.isChecked())
+        self.config.set("batched_inference_batch_size", self.batched_inference_batch_spin.value())
         self.config.set("lmstudio_enabled", self.lmstudio_enabled_checkbox.isChecked())
         self.config.set("lmstudio_base_url", self.lmstudio_base_input.text().strip())
         self.config.set("lmstudio_model", self.lmstudio_model_input.text().strip())
@@ -720,7 +760,12 @@ class MainWindow(QMainWindow):
         backend = self.config.get("whisper_backend") or "faster"
         if backend not in {"faster", "openai"}:
             backend = "faster"
-        compute_type = self.config.get("faster_whisper_compute_type") or "int8"
+        if backend not in {"faster", "openai"}:
+            backend = "faster"
+        compute_type = self.config.get("faster_whisper_compute_type") or "float16"
+        batched_enabled = bool(self.config.get("batched_inference_enabled"))
+        batched_size = int(self.config.get("batched_inference_batch_size") or 16)
+        
         use_correction = bool(self.config.get("use_local_llm_correction"))
         deep_correction = bool(self.config.get("deep_correction_enabled"))
         use_lmstudio = bool(self.config.get("lmstudio_enabled"))
@@ -784,6 +829,8 @@ class MainWindow(QMainWindow):
             task.device = device_pref
             task.whisper_backend = backend
             task.faster_whisper_compute_type = compute_type
+            task.batched_inference_enabled = batched_enabled
+            task.batched_inference_batch_size = batched_size
             task.use_local_llm_correction = use_correction
             task.deep_correction = deep_correction
             task.use_lmstudio = use_lmstudio

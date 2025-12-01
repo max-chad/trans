@@ -74,7 +74,7 @@ class AppConfig:
             "use_local_llm_translation": True,
             "local_llm_model_path": "",
             "whisper_backend": "faster",
-            "faster_whisper_compute_type": "auto",
+            "faster_whisper_compute_type": "float16",
             "include_txt_timestamps": False,
             "post_processing_action": "none",
             "post_processing_notification_text": "Processing complete",
@@ -100,6 +100,8 @@ class AppConfig:
             "diarization_num_speakers": 0,
             "diarization_threshold": 0.8,
             "diarization_device": "auto",
+            "batched_inference_enabled": True,
+            "batched_inference_batch_size": 16,
         }
         self.settings = self.load_config()
 

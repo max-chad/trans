@@ -645,21 +645,42 @@ class TranscriptionWorker(QThread):
         return False
 
     # Загружаем faster-whisper и обрабатываем падение на CPU при ошибках CUDA.
-    def _load_faster_whisper(self, context: DeviceContext, size: str, compute_type: str) -> bool:
+    def _load_faster_whisper(self, context: DeviceContext, size: str, compute_type: str, batched: bool = False, batch_size: int = 16) -> bool:
         try:
-            from faster_whisper import WhisperModel
+            from faster_whisper import WhisperModel, BatchedInferencePipeline
         except ImportError:
             self.log_message.emit("warning", "faster-whisper is not installed. Falling back to openai-whisper.")
             return False
+            
         target_device = context.device if context.device in {"cpu", "cuda"} else "cpu"
         if target_device == "cuda" and not torch.cuda.is_available():
             target_device = "cpu"
+            
+        mode_str = f"Batched (size={batch_size})" if batched else "Sequential"
         self.log_message.emit(
             "info",
-            f"Loading Faster-Whisper '{size}' on '{target_device}' ({compute_type})...",
+            f"Loading Faster-Whisper '{size}' on '{target_device}' ({compute_type}, {mode_str})...",
         )
         try:
             model = WhisperModel(size, device=target_device, compute_type=compute_type)
+            
+            if batched and target_device == "cuda":
+                try:
+                    # Wrap the model in the batched pipeline
+                    pipeline = BatchedInferencePipeline(model=model)
+                    with context.lock:
+                        context.model = pipeline
+                        context.model_size = size
+                        context.backend = "faster_batched"
+                        context.compute_type = compute_type
+                        context.runtime_device = target_device
+                    self.model_loaded.emit(True)
+                    self.log_message.emit("success", "Faster-Whisper (Batched) loaded.")
+                    return True
+                except Exception as batch_err:
+                    self.log_message.emit("warning", f"Failed to initialize batched pipeline: {batch_err}. Falling back to sequential.")
+                    # Fallthrough to sequential
+            
             with context.lock:
                 context.model = model
                 context.model_size = size
@@ -719,7 +740,7 @@ class TranscriptionWorker(QThread):
         return False
 
     # Гарантируем, что нужная модель загружена в контекст; при несоответствии переинициализируем.
-    def _ensure_model_for_context(self, context: DeviceContext, backend: str, size: str, compute_type: str) -> bool:
+    def _ensure_model_for_context(self, context: DeviceContext, backend: str, size: str, compute_type: str, batched: bool = False, batch_size: int = 16) -> bool:
         desired_backend = (backend or "openai").lower()
         normalized_compute = (compute_type or "auto").lower()
         
@@ -728,17 +749,33 @@ class TranscriptionWorker(QThread):
             self.log_message.emit("info", f"Auto-selected compute type: {normalized_compute}")
 
         current_backend = (context.backend or "").lower()
+        
+        # Check if we need to reload
+        is_batched = current_backend == "faster_batched"
+        desired_batched_backend = "faster_batched" if batched and desired_backend == "faster" else "faster"
+        
+        # If we want batched but have sequential (or vice versa), reload
+        backend_match = False
+        if desired_backend == "faster":
+             if batched:
+                 backend_match = current_backend == "faster_batched"
+             else:
+                 backend_match = current_backend == "faster"
+        else:
+            backend_match = current_backend == desired_backend
+
         if (
             context.model is not None
             and context.model_size == size
-            and current_backend == desired_backend
+            and backend_match
             and (desired_backend != "faster" or (context.compute_type or "").lower() == normalized_compute)
         ):
             return True
+            
         self._release_context_model(context)
         loaded = False
         if desired_backend == "faster":
-            loaded = self._load_faster_whisper(context, size, normalized_compute)
+            loaded = self._load_faster_whisper(context, size, normalized_compute, batched=batched, batch_size=batch_size)
             if not loaded:
                 self.log_message.emit("info", "Falling back to openai-whisper.")
         if not loaded:
@@ -851,28 +888,39 @@ class TranscriptionWorker(QThread):
                 f.write(f"{start} --> {end}\n{text}\n\n")
 
     # Выполняем транскрибацию аудио выбранным бэкендом и возвращаем список сегментов.
-    def _transcribe(self, context: DeviceContext, audio_path: Path, language: str) -> List[dict]:
+    def _transcribe(self, context: DeviceContext, audio_path: Path, language: str, batch_size: int = 16) -> List[dict]:
         model = context.model
         if model is None:
             return []
         backend = (context.backend or "").lower()
-        if backend == "faster":
+        
+        if backend in {"faster", "faster_batched"}:
             lang = None if language == "auto" else language
             try:
-                segments_iter, _ = model.transcribe(
-                    str(audio_path),
-                    language=lang,
-                    beam_size=5,
-                    vad_filter=True,
-                    word_timestamps=True,
-                )
+                # Common arguments
+                transcribe_kwargs = {
+                    "language": lang,
+                    "beam_size": 5,
+                    "word_timestamps": True,
+                }
+                
+                if backend == "faster_batched":
+                    # Batched pipeline uses 'batch_size'
+                    transcribe_kwargs["batch_size"] = batch_size
+                    segments_iter, _ = model.transcribe(str(audio_path), **transcribe_kwargs)
+                else:
+                    # Standard model uses 'vad_filter'
+                    transcribe_kwargs["vad_filter"] = True
+                    segments_iter, _ = model.transcribe(str(audio_path), **transcribe_kwargs)
+
             except TypeError:
+                # Fallback for older versions or mismatch
                 segments_iter, _ = model.transcribe(
                     str(audio_path),
                     language=lang,
                     beam_size=5,
-                    vad_filter=True,
                 )
+                
             segments: List[dict] = []
             for seg in segments_iter:
                 words_data: List[dict] = []
@@ -1155,7 +1203,9 @@ class TranscriptionWorker(QThread):
                 context,
                 task.whisper_backend or "openai",
                 task.model_size,
-                task.faster_whisper_compute_type or "int8",
+                task.faster_whisper_compute_type or "float16",
+                batched=task.batched_inference_enabled,
+                batch_size=task.batched_inference_batch_size,
             ):
                 if context.device == "cuda" and "cpu" in self._contexts and context is not self._contexts["cpu"]:
                     self.log_message.emit("warning", f"Falling back to CPU for {task.video_path.name}")
@@ -1168,7 +1218,12 @@ class TranscriptionWorker(QThread):
             self.progress_updated.emit(task.task_id, 30)
             self.log_message.emit("info", f"Processing audio {audio_path.name}...")
             try:
-                segments = self._transcribe(context, audio_path, task.language)
+                segments = self._transcribe(
+                    context, 
+                    audio_path, 
+                    task.language, 
+                    batch_size=task.batched_inference_batch_size
+                )
             except Exception as exc:
                 message = str(exc)
                 if (
