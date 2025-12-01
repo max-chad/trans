@@ -98,6 +98,7 @@ class AppConfig:
             "lmstudio_poll_interval": 1.5,
             "enable_diarization": False,
             "diarization_num_speakers": 0,
+            "diarization_threshold": 0.8,
             "diarization_device": "auto",
         }
         self.settings = self.load_config()
@@ -228,7 +229,7 @@ class AppConfig:
                 return int(self.settings.get(key, self.defaults.get(key, 0)))
             except (TypeError, ValueError):
                 return int(self.defaults.get(key, 0))
-        if key in {"lmstudio_poll_interval"}:
+        if key in {"lmstudio_poll_interval", "diarization_threshold"}:
             try:
                 return float(self.settings.get(key, self.defaults.get(key, 0.0)))
             except (TypeError, ValueError):

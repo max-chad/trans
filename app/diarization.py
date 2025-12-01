@@ -77,6 +77,11 @@ class DiarizationService:
         self.offline = not _env_flag("SPEECHBRAIN_ALLOW_DOWNLOAD", True)
         self.repo_root = Path(__file__).resolve().parent.parent
         self.savedir = self.repo_root / "pretrained_models" / "spkrec-ecapa-voxceleb"
+        try:
+            torchaudio.set_audio_backend("soundfile")
+        except Exception:
+            # Not all builds expose set_audio_backend (or the soundfile backend), but we still fall back below.
+            pass
 
     def _resolve_device(self, requested: str) -> str:
         if requested == "auto":
@@ -186,7 +191,37 @@ class DiarizationService:
         # embeddings shape: (batch, 1, 192) -> squeeze to (192,)
         return embeddings.squeeze().detach().cpu().numpy()
 
-    def run(self, audio_path: Path, segments: List[dict], num_speakers: Optional[int] = None) -> List[dict]:
+    def _load_waveform(self, audio_path: Path) -> Optional[Tuple[torch.Tensor, int]]:
+        """
+        Try soundfile first to avoid torchcodec/FFmpeg issues on Windows, then fall back to torchaudio.
+        """
+        # 1. Try soundfile
+        try:
+            import soundfile as sf  # type: ignore
+            data, sample_rate = sf.read(str(audio_path), dtype="float32", always_2d=False)
+            waveform = torch.from_numpy(data)
+            if waveform.dim() == 1:
+                waveform = waveform.unsqueeze(0)
+            elif waveform.dim() == 2:
+                waveform = waveform.transpose(0, 1).contiguous()
+            else:
+                self.logger.error(f"Unexpected audio shape from soundfile for {audio_path.name}: {waveform.shape}")
+                return None
+            return waveform, int(sample_rate)
+        except Exception as sf_err:
+            self.logger.warning(f"SoundFile failed to read {audio_path.name}: {sf_err}. Falling back to torchaudio.")
+
+        # 2. Fallback to torchaudio
+        try:
+            waveform, sample_rate = torchaudio.load(str(audio_path))
+            return waveform, int(sample_rate)
+        except Exception as exc:
+            self.logger.error(
+                f"torchaudio.load also failed for {audio_path.name}: {exc}."
+            )
+            return None
+
+    def run(self, audio_path: Path, segments: List[dict], num_speakers: Optional[int] = None, **kwargs) -> List[dict]:
         """
         Assign speaker labels to the provided segments.
         
@@ -222,15 +257,15 @@ class DiarizationService:
         self.logger.info(f"Running speaker diarization on {self.device}.")
         
         # Load audio
-        try:
-            waveform, sample_rate = torchaudio.load(str(audio_path))
-            waveform = waveform.to(self.device, non_blocking=True)
-            # If stereo, mix to mono
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
-        except Exception as e:
-            self.logger.error(f"Failed to load audio {audio_path}: {e}")
+        loaded = self._load_waveform(audio_path)
+        if loaded is None:
+            self.logger.error(f"Failed to load audio {audio_path}. Skipping diarization.")
             return segments
+        waveform, sample_rate = loaded
+        waveform = waveform.to(self.device, non_blocking=True)
+        # If stereo, mix to mono
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
 
         embeddings = []
         valid_indices = []
@@ -266,25 +301,24 @@ class DiarizationService:
         X = np.array(embeddings)
         self.logger.info(f"Diarization embeddings collected: {len(embeddings)}/{len(segments)} segments.")
         
-        # Clustering
-        # If num_speakers is not provided, we can try to estimate or use a threshold.
-        # AgglomerativeClustering with distance_threshold requires n_clusters=None.
-        # A threshold of 0.7-0.8 is often used for cosine distance, but sklearn uses euclidean by default for ward.
-        # For cosine, we need metric='cosine' and linkage='average' or 'complete'.
-        
+        if len(embeddings) < 2:
+            self.logger.info("Less than 2 segments/embeddings. Assigning all to SPEAKER_00.")
+            for idx in valid_indices:
+                segments[idx]["speaker"] = "SPEAKER_00"
+            return segments
+
         try:
             if num_speakers:
                 clustering = AgglomerativeClustering(n_clusters=num_speakers)
             else:
-                # Tuning threshold might be needed. 
-                # SpeechBrain embeddings are normalized, so cosine distance is appropriate.
-                # However, AgglomerativeClustering with cosine metric is available in newer sklearn.
-                # Fallback to euclidean on normalized vectors is roughly equivalent to cosine.
+                # Use Cosine distance with Average linkage for better speaker clustering.
+                # Threshold is configurable (default 0.8).
+                threshold = kwargs.get("threshold", 0.8)
                 clustering = AgglomerativeClustering(
                     n_clusters=None, 
-                    distance_threshold=1.5, # Tunable parameter
-                    metric='euclidean',
-                    linkage='ward'
+                    distance_threshold=threshold,
+                    metric='cosine',
+                    linkage='average'
                 )
             
             labels = clustering.fit_predict(X)

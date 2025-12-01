@@ -838,6 +838,30 @@ class MainWindow(QMainWindow):
             self.remove_task(tid)
         self.log_message("info", "Список задач очищен.")
 
+    def _build_processing_settings(self) -> ProcessingSettings:
+        return ProcessingSettings(
+            pipeline_mode=self.config.get("parallel_mode"),
+            correction_gpu_layers=0,
+            correction_batch_size=int(self.config.get("correction_batch_size") or 40),
+            release_whisper_after_batch=bool(self.config.get("release_whisper_after_batch")),
+            deep_correction=bool(self.config.get("deep_correction_enabled")),
+            llama_n_ctx=int(self.config.get("llama_n_ctx") or 4096),
+            llama_batch_size=int(self.config.get("llama_batch_size") or 40),
+            llama_gpu_layers=int(self.config.get("llama_gpu_layers") or 0),
+            llama_main_gpu=int(self.config.get("llama_main_gpu") or 0),
+            enable_cudnn_benchmark=bool(self.config.get("enable_cudnn_benchmark")),
+            use_lmstudio=bool(self.config.get("lmstudio_enabled")),
+            lmstudio_base_url=self.config.get("lmstudio_base_url") or "",
+            lmstudio_model=self.config.get("lmstudio_model") or "",
+            lmstudio_api_key=self.config.get("lmstudio_api_key") or "",
+            lmstudio_batch_size=int(self.config.get("lmstudio_batch_size") or 40),
+            lmstudio_prompt_token_limit=int(self.config.get("lmstudio_prompt_token_limit") or 8192),
+            lmstudio_load_timeout=float(self.config.get("lmstudio_load_timeout") or 600.0),
+            lmstudio_poll_interval=float(self.config.get("lmstudio_poll_interval") or 1.5),
+            diarization_device=self.config.get("diarization_device") or "auto",
+            diarization_threshold=float(self.config.get("diarization_threshold") or 0.8),
+        )
+
     def start_processing(self):
         if not self.tasks:
             QMessageBox.warning(self, "Ошибка", "Нет задач для обработки.")
@@ -851,6 +875,7 @@ class MainWindow(QMainWindow):
         self._processing_active = True
         self.process_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.worker.update_processing_settings(self._build_processing_settings())
         self.worker.resume_processing()
         
         count = 0

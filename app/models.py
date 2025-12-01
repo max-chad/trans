@@ -76,3 +76,4 @@ class ProcessingSettings:
     lmstudio_load_timeout: float = 600.0
     lmstudio_poll_interval: float = 1.5
     diarization_device: str = "auto"
+    diarization_threshold: float = 0.8

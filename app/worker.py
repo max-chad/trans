@@ -231,7 +231,12 @@ class TranscriptionWorker(QThread):
         self.log_message.emit("info", f"Starting speaker diarization for {task.video_path.name}...")
         try:
             # DiarizationService.run modifies segments in-place or returns them
-            diarized_segments = self.diarization.run(audio_path, segments, num_speakers=task.num_speakers)
+            diarized_segments = self.diarization.run(
+                audio_path, 
+                segments, 
+                num_speakers=task.num_speakers,
+                threshold=self.settings.diarization_threshold
+            )
             self.log_message.emit("success", "Speaker diarization completed.")
             return diarized_segments
         except Exception as e:
@@ -827,7 +832,7 @@ class TranscriptionWorker(QThread):
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("WEBVTT\n\n")
-            timeline = self._build_word_timeline(segments) or segments
+            timeline = build_word_timeline(segments) or segments
             for seg in timeline:
                 start = format_vtt(seg.get("start", 0.0))
                 end = format_vtt(seg.get("end", seg.get("start", 0.0)))
