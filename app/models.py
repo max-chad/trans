@@ -47,6 +47,7 @@ class TranscriptionTask:
     enable_diarization: bool = False
     num_speakers: Optional[int] = None
     diarization_device: str = "auto"
+    diarization_compute_type: str = "auto"
     batched_inference_enabled: bool = True
     batched_inference_batch_size: int = 16
 
@@ -79,5 +80,6 @@ class ProcessingSettings:
     lmstudio_poll_interval: float = 1.5
     diarization_device: str = "auto"
     diarization_threshold: float = 0.8
+    diarization_compute_type: str = "auto"
     batched_inference_enabled: bool = True
     batched_inference_batch_size: int = 16

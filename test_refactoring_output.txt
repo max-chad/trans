@@ -1,1 +1,0 @@
-test_diarization_run_mock failed: 'speaker' not found in {'start': 0.0, 'end': 2.0, 'text': 'Hello'}

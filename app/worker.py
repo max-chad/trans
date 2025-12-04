@@ -107,7 +107,7 @@ class TranscriptionWorker(QThread):
         self._active_transcriptions = 0
         diar_device = os.getenv("DIARIZATION_DEVICE", "auto")
         self._diarization_device = diar_device
-        self.diarization = DiarizationService(device=diar_device)
+        self.diarization = DiarizationService(device=diar_device, compute_type="auto")
 
     # Обновляем параметры обработки и при необходимости запускаем или завершаем фазу корректировки.
     def update_processing_settings(self, settings: ProcessingSettings):
@@ -120,8 +120,9 @@ class TranscriptionWorker(QThread):
                 pending_flush = list(self._staged_corrections)
                 self._staged_corrections.clear()
                 self._in_correction_phase = False
-            if getattr(settings, "diarization_device", None):
+            if getattr(settings, "diarization_device", None) or getattr(settings, "diarization_compute_type", None):
                 self.set_diarization_device(settings.diarization_device)
+                # Note: set_diarization_device now reads compute_type from self.settings, which was just updated above.
         if pending_flush:
             for task in pending_flush:
                 self._dispatch_correction(task)
@@ -183,12 +184,17 @@ class TranscriptionWorker(QThread):
     def _release_all_models(self):
         for context in self._contexts.values():
             self._release_context_model(context)
+        # Also unload diarization model
+        if hasattr(self, "diarization"):
+            self.diarization.unload_model()
 
     def set_diarization_device(self, device: str):
         """Recreate diarization service on the desired device."""
         resolved = device or "auto"
         self._diarization_device = resolved
-        self.diarization = DiarizationService(device=resolved)
+        # Use current settings for compute type if available, else auto
+        compute_type = getattr(self.settings, "diarization_compute_type", "auto")
+        self.diarization = DiarizationService(device=resolved, compute_type=compute_type)
 
     # Загружаем пайплайн diarization от pyannote и кэшируем его для повторного использования.
     @staticmethod
@@ -243,6 +249,9 @@ class TranscriptionWorker(QThread):
         except Exception as e:
             self.log_message.emit("error", f"Diarization failed: {e}")
             return segments
+        finally:
+            # Always unload the diarization model to free up VRAM for the next task
+            self.diarization.unload_model()
 
     # Фиксируем старт обработки задачи для дальнейшей статистики.
     def _mark_task_start(self, task: TranscriptionTask):

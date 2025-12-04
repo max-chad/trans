@@ -1,4 +1,0 @@
-SPEECHBRAIN_AVAILABLE: True
-Result: [{'start': 0.0, 'end': 2.0, 'text': 'Hello', 'speaker': 'SPEAKER_00'}]
-Mock load called: True
-Mock encode called: True

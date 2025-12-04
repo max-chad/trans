@@ -100,6 +100,7 @@ class AppConfig:
             "diarization_num_speakers": 0,
             "diarization_threshold": 0.8,
             "diarization_device": "auto",
+            "diarization_compute_type": "auto",
             "batched_inference_enabled": True,
             "batched_inference_batch_size": 16,
         }

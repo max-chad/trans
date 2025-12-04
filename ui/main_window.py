@@ -9,6 +9,7 @@ from PyQt6.QtGui import QDesktopServices
 from app.config import AppConfig
 from app.gpu_detection import GPUDetectionResult, detect_supported_nvidia_gpus
 from app.lmstudio_client import validate_lmstudio_settings
+from typing import Any
 from app.models import DeviceType, OutputRequest, ProcessingSettings, TranscriptionTask
 from app.translator import TranslationWorker, TranslationTask
 from app.worker import TranscriptionWorker
@@ -272,7 +273,7 @@ class MainWindow(QMainWindow):
 
         basic_layout.addWidget(QLabel("Модель Whisper:"), 3, 0)
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["tiny", "base", "small", "medium", "large"])
+        self.model_combo.addItems(["tiny", "base", "small", "medium", "large", "large-v3", "large-v3-turbo"])
         self.model_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
         basic_layout.addWidget(self.model_combo, 3, 1, 1, 2)
         
@@ -361,7 +362,17 @@ class MainWindow(QMainWindow):
         self.diarization_speakers_spin.setStyleSheet(AppTheme.SPINBOX_STYLE)
         basic_layout.addWidget(self.diarization_speakers_spin, 11, 1)
 
-        basic_layout.setRowStretch(11, 1)
+        # Row 12: Diarization Compute Type
+        basic_layout.addWidget(QLabel("Diarization precision:"), 12, 0)
+        self.diarization_compute_type_combo = QComboBox()
+        self.diarization_compute_type_combo.addItem("Auto", "auto")
+        self.diarization_compute_type_combo.addItem("FP16 (Half)", "float16")
+        self.diarization_compute_type_combo.addItem("FP32 (Full)", "float32")
+        self.diarization_compute_type_combo.addItem("BFLOAT16", "bfloat16")
+        self.diarization_compute_type_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
+        basic_layout.addWidget(self.diarization_compute_type_combo, 12, 1, 1, 2)
+
+        basic_layout.setRowStretch(13, 1)
         self.settings_tabs.addTab(basic_tab, "Основные")
 
         advanced_tab = QWidget()
@@ -636,6 +647,13 @@ class MainWindow(QMainWindow):
             self.worker.set_diarization_device(diar_device)
         except Exception:
             pass
+            
+        diar_compute = self.config.get("diarization_compute_type") or "auto"
+        idx = self.diarization_compute_type_combo.findData(diar_compute)
+        if idx >= 0:
+            self.diarization_compute_type_combo.setCurrentIndex(idx)
+        else:
+            self.diarization_compute_type_combo.setCurrentIndex(0)
 
         batch_size = int(
             self.config.get("correction_batch_size")
@@ -655,6 +673,75 @@ class MainWindow(QMainWindow):
         if self.config.load_warning:
             self.log_message("warning", self.config.load_warning)
             QMessageBox.warning(self, "Config warning", self.config.load_warning)
+
+        # Connect signals for immediate saving
+        self.output_mode_combo.currentIndexChanged.connect(lambda: self.on_setting_changed("output_mode", self.output_mode_combo.currentData()))
+        self.lang_combo.currentTextChanged.connect(lambda t: self.on_setting_changed("language", t))
+        self.model_combo.currentTextChanged.connect(self.on_model_changed)
+        self.compute_type_combo.currentIndexChanged.connect(lambda: self.on_setting_changed("faster_whisper_compute_type", self.compute_type_combo.currentData()))
+        self.translate_lang_combo.currentTextChanged.connect(lambda t: self.on_setting_changed("translate_lang", t))
+        self.pipeline_mode_combo.currentIndexChanged.connect(lambda: self.on_setting_changed("parallel_mode", self.pipeline_mode_combo.currentData()))
+        self.diarization_device_combo.currentIndexChanged.connect(lambda: self.on_setting_changed("diarization_device", self.diarization_device_combo.currentData()))
+        self.diarization_compute_type_combo.currentIndexChanged.connect(lambda: self.on_setting_changed("diarization_compute_type", self.diarization_compute_type_combo.currentData()))
+        self.post_action_combo.currentIndexChanged.connect(lambda: self.on_setting_changed("post_processing_action", self.post_action_combo.currentData()))
+        
+        self.device_group.buttonClicked.connect(self.on_device_changed)
+        
+        self.deep_correction_checkbox.toggled.connect(lambda c: self.on_setting_changed("deep_correction_enabled", c))
+        self.batched_inference_checkbox.toggled.connect(lambda c: self.on_setting_changed("batched_inference_enabled", c))
+        self.lmstudio_enabled_checkbox.toggled.connect(lambda c: self.on_setting_changed("lmstudio_enabled", c))
+        self.diarization_enabled_checkbox.toggled.connect(lambda c: self.on_setting_changed("enable_diarization", c))
+        
+        self.correction_batch_spin.valueChanged.connect(lambda v: self.on_setting_changed("correction_batch_size", v))
+        self.batched_inference_batch_spin.valueChanged.connect(lambda v: self.on_setting_changed("batched_inference_batch_size", v))
+        self.lmstudio_batch_spin.valueChanged.connect(lambda v: self.on_setting_changed("lmstudio_batch_size", v))
+        self.lmstudio_prompt_tokens_spin.valueChanged.connect(lambda v: self.on_setting_changed("lmstudio_prompt_token_limit", v))
+        self.lmstudio_timeout_spin.valueChanged.connect(lambda v: self.on_setting_changed("lmstudio_load_timeout", v))
+        self.lmstudio_poll_spin.valueChanged.connect(lambda v: self.on_setting_changed("lmstudio_poll_interval", v))
+        self.diarization_speakers_spin.valueChanged.connect(lambda v: self.on_setting_changed("diarization_num_speakers", v))
+        
+        self.lmstudio_base_input.editingFinished.connect(lambda: self.on_setting_changed("lmstudio_base_url", self.lmstudio_base_input.text().strip()))
+        self.lmstudio_model_input.editingFinished.connect(lambda: self.on_setting_changed("lmstudio_model", self.lmstudio_model_input.text().strip()))
+        self.lmstudio_api_key_input.editingFinished.connect(lambda: self.on_setting_changed("lmstudio_api_key", self.lmstudio_api_key_input.text().strip()))
+        self.post_notification_input.editingFinished.connect(lambda: self.on_setting_changed("post_processing_notification_text", self.post_notification_input.text().strip()))
+        
+        for key, checkbox in self.output_format_checks.items():
+            checkbox.toggled.connect(self.on_output_format_changed)
+
+    def on_setting_changed(self, key: str, value: Any):
+        self.config.set(key, value)
+
+    def on_model_changed(self, text: str):
+        self.config.set("model_size", text)
+        self.log_message("info", f"Model changed to: {text}")
+
+    def on_device_changed(self, button):
+        if button == self.hybrid_radio:
+            self.config.set("device", "hybrid")
+        elif button == self.gpu_radio:
+            self.config.set("device", "cuda")
+        else:
+            self.config.set("device", "cpu")
+
+    def on_output_format_changed(self):
+        selected_formats = [key for key, checkbox in self.output_format_checks.items() if checkbox.isChecked()]
+        if not selected_formats:
+            # Prevent unchecking all
+            sender = self.sender()
+            if sender:
+                sender.blockSignals(True)
+                sender.setChecked(True)
+                sender.blockSignals(False)
+            return
+            
+        self.config.set("output_formats_multi", selected_formats)
+        primary_format = selected_formats[0]
+        if primary_format.startswith("txt"):
+            self.config.set("output_format", "txt")
+            self.config.set("include_txt_timestamps", primary_format in {"txt_ts", "txt_timestamps"})
+        else:
+            self.config.set("output_format", "srt")
+            self.config.set("include_txt_timestamps", primary_format in {"txt_ts", "txt_timestamps"})
 
     def save_settings(self):
         if self.isMaximized():
@@ -707,6 +794,7 @@ class MainWindow(QMainWindow):
         self.config.set("parallel_mode", self.pipeline_mode_combo.currentData())
         self.config.set("enable_diarization", self.diarization_enabled_checkbox.isChecked())
         self.config.set("diarization_device", self.diarization_device_combo.currentData())
+        self.config.set("diarization_compute_type", self.diarization_compute_type_combo.currentData())
         self.config.set("diarization_num_speakers", int(self.diarization_speakers_spin.value()))
         self.config.set("correction_batch_size", self.correction_batch_spin.value())
         self.config.set("llama_batch_size", self.correction_batch_spin.value())
@@ -845,6 +933,7 @@ class MainWindow(QMainWindow):
             task.enable_diarization = enable_diarization
             task.num_speakers = diarization_num_speakers if diarization_num_speakers > 0 else None
             task.diarization_device = diarization_device
+            task.diarization_compute_type = self.config.get("diarization_compute_type") or "auto"
             
             task.outputs = [
                 OutputRequest(format=fmt, include_timestamps=fmt in {"txt_ts", "txt_timestamps"})
@@ -912,6 +1001,7 @@ class MainWindow(QMainWindow):
             lmstudio_poll_interval=float(self.config.get("lmstudio_poll_interval") or 1.5),
             diarization_device=self.config.get("diarization_device") or "auto",
             diarization_threshold=float(self.config.get("diarization_threshold") or 0.8),
+            diarization_compute_type=self.config.get("diarization_compute_type") or "auto",
         )
 
     def start_processing(self):

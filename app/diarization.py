@@ -1,4 +1,5 @@
 import logging
+import gc
 import os
 import shutil
 import numpy as np
@@ -62,13 +63,15 @@ class DiarizationService:
     ]
     OPTIONAL_LABEL_FILES = ["label_encoder.ckpt", "label_encoder.txt"]
 
-    def __init__(self, device: str = "auto"):
+    def __init__(self, device: str = "auto", compute_type: str = "auto"):
         """
         Args:
             device: Preferred device ('cpu', 'cuda', 'auto', or explicit CUDA id like 'cuda:0').
+            compute_type: Precision ('auto', 'float16', 'float32', 'bfloat16').
         """
         self.logger = logging.getLogger(__name__)
         self.requested_device = (device or "auto").lower()
+        self.compute_type = (compute_type or "auto").lower()
         self.device = self._resolve_device(self.requested_device)
         self.classifier = None
         self._model_device: Optional[str] = None
@@ -130,10 +133,32 @@ class DiarizationService:
             if LocalStrategy is not None:
                 kwargs["local_strategy"] = LocalStrategy.COPY
             self.classifier = EncoderClassifier.from_hparams(**kwargs)
+            
+            # Apply compute type casting ONLY to the embedding model
+            # The feature extractor (compute_features) must remain in float32
+            if self.compute_type == "float16":
+                self.classifier.mods.embedding_model.to(dtype=torch.float16)
+            elif self.compute_type == "bfloat16":
+                self.classifier.mods.embedding_model.to(dtype=torch.bfloat16)
+            elif self.compute_type == "float32":
+                self.classifier.mods.embedding_model.to(dtype=torch.float32)
+                
             self._model_device = self.device
         except Exception as e:
             self.logger.error(f"Failed to load SpeechBrain model: {e}")
             raise
+
+    def unload_model(self):
+        """Unload the model and free GPU memory."""
+        if self.classifier is not None:
+            del self.classifier
+            self.classifier = None
+        self._resamplers.clear()
+        self._model_device = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self.logger.info("Diarization model unloaded and memory freed.")
 
     def _has_local_model(self) -> bool:
         core_ok = all((self.savedir / name).exists() for name in self.REQUIRED_FILES)
@@ -185,11 +210,35 @@ class DiarizationService:
             audio_segment = resampler(audio_segment)
 
         with torch.inference_mode():
-            autocast_enabled = self.device.startswith("cuda")
-            with torch.autocast(device_type="cuda", enabled=autocast_enabled):
-                embeddings = self.classifier.encode_batch(audio_segment)
+            # Determine target dtype
+            target_dtype = torch.float32
+            if self.compute_type == "float16":
+                target_dtype = torch.float16
+            elif self.compute_type == "bfloat16":
+                target_dtype = torch.bfloat16
+            
+            # 1. Compute features (always float32)
+            # We must disable autocast for this step to ensure Fbank works correctly
+            with torch.autocast(device_type="cuda", enabled=False):
+                feats = self.classifier.mods.compute_features(audio_segment)
+                feats = self.classifier.mods.mean_var_norm(feats, torch.tensor([1.0], device=self.device))
+            
+            # 2. Cast features to target dtype
+            if target_dtype != torch.float32:
+                feats = feats.to(dtype=target_dtype)
+                
+            # 3. Run embedding model
+            # If auto, let pytorch handle it. If explicit, we already cast the model and input.
+            if self.compute_type == "auto":
+                 with torch.autocast(device_type="cuda", enabled=self.device.startswith("cuda")):
+                     embeddings = self.classifier.mods.embedding_model(feats)
+            else:
+                 # Manual mode: model and input are already in target_dtype
+                 with torch.autocast(device_type="cuda", enabled=False):
+                     embeddings = self.classifier.mods.embedding_model(feats)
+
         # embeddings shape: (batch, 1, 192) -> squeeze to (192,)
-        return embeddings.squeeze().detach().cpu().numpy()
+        return embeddings.squeeze().detach().cpu().float().numpy()
 
     def _load_waveform(self, audio_path: Path) -> Optional[Tuple[torch.Tensor, int]]:
         """
