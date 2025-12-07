@@ -63,7 +63,7 @@ class ProcessingSettings:
     pipeline_mode: str = "balanced"
     correction_gpu_layers: int = 0
     correction_batch_size: int = 40
-    release_whisper_after_batch: bool = True
+    release_whisper_after_batch: bool = False
     deep_correction: bool = False
     llama_n_ctx: int = 4096
     llama_batch_size: int = 40

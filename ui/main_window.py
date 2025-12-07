@@ -400,7 +400,11 @@ class MainWindow(QMainWindow):
 
         self.deep_correction_checkbox = QCheckBox("Глубокая коррекция текста (замедляет обработку)")
         self.deep_correction_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
-        advanced_layout.addWidget(self.deep_correction_checkbox, 3, 0, 1, 4)
+        advanced_layout.addWidget(self.deep_correction_checkbox, 3, 0, 1, 2)
+        
+        self.release_memory_checkbox = QCheckBox("Освобождать VRAM (экономия памяти)")
+        self.release_memory_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
+        advanced_layout.addWidget(self.release_memory_checkbox, 3, 2, 1, 2)
 
         advanced_layout.addWidget(QLabel("LM Studio enabled:"), 4, 0)
         self.lmstudio_enabled_checkbox = QCheckBox("Включить LM Studio")
@@ -589,6 +593,7 @@ class MainWindow(QMainWindow):
         self.lang_combo.setCurrentText(self.config.get("language"))
         self.translate_lang_combo.setCurrentText(self.config.get("translate_lang") or "en")
         self.deep_correction_checkbox.setChecked(bool(self.config.get("deep_correction_enabled")))
+        self.release_memory_checkbox.setChecked(bool(self.config.get("release_whisper_after_batch")))
         
         self.batched_inference_checkbox.setChecked(bool(self.config.get("batched_inference_enabled")))
         self.batched_inference_batch_spin.setValue(int(self.config.get("batched_inference_batch_size") or 16))
@@ -688,6 +693,7 @@ class MainWindow(QMainWindow):
         self.device_group.buttonClicked.connect(self.on_device_changed)
         
         self.deep_correction_checkbox.toggled.connect(lambda c: self.on_setting_changed("deep_correction_enabled", c))
+        self.release_memory_checkbox.toggled.connect(lambda c: self.on_setting_changed("release_whisper_after_batch", c))
         self.batched_inference_checkbox.toggled.connect(lambda c: self.on_setting_changed("batched_inference_enabled", c))
         self.lmstudio_enabled_checkbox.toggled.connect(lambda c: self.on_setting_changed("lmstudio_enabled", c))
         self.diarization_enabled_checkbox.toggled.connect(lambda c: self.on_setting_changed("enable_diarization", c))
@@ -772,6 +778,7 @@ class MainWindow(QMainWindow):
         else:
             self.config.set("device", "cpu")
         self.config.set("deep_correction_enabled", self.deep_correction_checkbox.isChecked())
+        self.config.set("release_whisper_after_batch", self.release_memory_checkbox.isChecked())
         self.config.set("batched_inference_enabled", self.batched_inference_checkbox.isChecked())
         self.config.set("batched_inference_batch_size", self.batched_inference_batch_spin.value())
         self.config.set("lmstudio_enabled", self.lmstudio_enabled_checkbox.isChecked())

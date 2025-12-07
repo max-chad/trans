@@ -21,7 +21,7 @@ def launch_gui(config_path: Path | None = None) -> int:
     # Import torch before any PyQt modules to avoid Windows DLL init issues with CUDA wheels.
     import torch  # noqa: F401
     from ui.splash_screen import SplashScreen
-    from ui.main_window import MainWindow
+    from ui.main_window import MainWindow           
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import QTimer
 

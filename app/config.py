@@ -84,7 +84,7 @@ class AppConfig:
             "llama_main_gpu": 0,
             "llama_batch_size": 40,
             "llama_n_ctx": 4096,
-            "release_whisper_after_batch": True,
+            "release_whisper_after_batch": False,
             "enable_cudnn_benchmark": True,
             "correction_batch_size": 40,
             "deep_correction_enabled": False,
