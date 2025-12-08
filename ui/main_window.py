@@ -17,6 +17,21 @@ from .task_widget import VideoTaskWidget
 from .styles import AppTheme
 
 
+class ModelDownloadWorker(QThread):
+    finished = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            from app.diarization import DiarizationService
+            # Create a temporary service just for downloading
+            # Force allow_download=True so it can fetch
+            service = DiarizationService(device="cpu", offline_mode=False, allow_download=True)
+            service.download_models()
+            self.finished.emit(True, "Diarization models downloaded successfully.")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
 class MainWindow(QMainWindow):
     VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".mpg", ".mpeg", ".m4v", ".webm"}
     AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wma"}
@@ -372,7 +387,20 @@ class MainWindow(QMainWindow):
         self.diarization_compute_type_combo.setStyleSheet(AppTheme.COMBOBOX_STYLE)
         basic_layout.addWidget(self.diarization_compute_type_combo, 12, 1, 1, 2)
 
-        basic_layout.setRowStretch(13, 1)
+        # Row 13: Allow Download
+        basic_layout.addWidget(QLabel("Model Download:"), 13, 0)
+        self.diarization_download_checkbox = QCheckBox("Allow fetching (Internet)")
+        self.diarization_download_checkbox.setToolTip("Enable this ONCE to download models, then disable it to stay local.")
+        self.diarization_download_checkbox.setStyleSheet(AppTheme.RADIOBUTTON_STYLE)
+        basic_layout.addWidget(self.diarization_download_checkbox, 13, 1)
+
+        self.download_models_btn = QPushButton("Скачать модели")
+        self.download_models_btn.setToolTip("Force download models now for offline use")
+        self.download_models_btn.setStyleSheet(AppTheme.SECONDARY_BUTTON_STYLE)
+        self.download_models_btn.clicked.connect(self.download_diarization_models)
+        basic_layout.addWidget(self.download_models_btn, 13, 2)
+
+        basic_layout.setRowStretch(14, 1)
         self.settings_tabs.addTab(basic_tab, "Основные")
 
         advanced_tab = QWidget()
@@ -660,6 +688,8 @@ class MainWindow(QMainWindow):
         else:
             self.diarization_compute_type_combo.setCurrentIndex(0)
 
+        self.diarization_download_checkbox.setChecked(bool(self.config.get("diarization_allow_download")))
+
         batch_size = int(
             self.config.get("correction_batch_size")
             or self.config.get("llama_batch_size")
@@ -697,6 +727,7 @@ class MainWindow(QMainWindow):
         self.batched_inference_checkbox.toggled.connect(lambda c: self.on_setting_changed("batched_inference_enabled", c))
         self.lmstudio_enabled_checkbox.toggled.connect(lambda c: self.on_setting_changed("lmstudio_enabled", c))
         self.diarization_enabled_checkbox.toggled.connect(lambda c: self.on_setting_changed("enable_diarization", c))
+        self.diarization_download_checkbox.toggled.connect(lambda c: self.on_setting_changed("diarization_allow_download", c))
         
         self.correction_batch_spin.valueChanged.connect(lambda v: self.on_setting_changed("correction_batch_size", v))
         self.batched_inference_batch_spin.valueChanged.connect(lambda v: self.on_setting_changed("batched_inference_batch_size", v))
@@ -716,6 +747,47 @@ class MainWindow(QMainWindow):
 
     def on_setting_changed(self, key: str, value: Any):
         self.config.set(key, value)
+        if key.startswith("diarization_") or key == "enable_diarization":
+             self._update_worker_diarization_settings()
+
+    def _update_worker_diarization_settings(self):
+        # Build a partial settings object or just trigger an update
+        # Worker.update_processing_settings takes a ProcessingSettings object
+        # which is somewhat heavy to construct fully here if we don't have it handy.
+        # But we can reconstruct it from config.
+        # Actually, let's look at start_processing where it constructs settings.
+        # Ideally, we should just update the worker on the fly.
+        
+        # We'll do a partial update if we can, or just rely on start_processing picking it up.
+        # The worker's update_processing_settings is mainly for runtime changes.
+        # Since we use config.set, the NEXT start_processing will pick it up.
+        # However, update_processing_settings also handles tearing down/rebuilding DiarizationService instantly.
+        
+        settings = ProcessingSettings(
+             diarization_device=self.config.get("diarization_device"),
+             diarization_compute_type=self.config.get("diarization_compute_type"),
+             diarization_threshold=self.config.get("diarization_threshold"),
+             diarization_offline_mode=self.config.get("diarization_offline_mode"),
+             diarization_allow_download=self.config.get("diarization_allow_download"),
+             # other fields not critical for this specific update
+        )
+        self.worker.update_processing_settings(settings)
+
+    def download_diarization_models(self):
+        self.download_models_btn.setEnabled(False)
+        self.log_message("info", "Starting background model download...")
+        self.dl_worker = ModelDownloadWorker()
+        self.dl_worker.finished.connect(self._on_download_finished)
+        self.dl_worker.start()
+
+    def _on_download_finished(self, success, message):
+        self.download_models_btn.setEnabled(True)
+        if success:
+            self.log_message("success", message)
+            QMessageBox.information(self, "Download", message)
+        else:
+            self.log_message("error", f"Download failed: {message}")
+            QMessageBox.critical(self, "Error", f"Could not download models:\n{message}")
 
     def on_model_changed(self, text: str):
         self.config.set("model_size", text)
@@ -1009,6 +1081,8 @@ class MainWindow(QMainWindow):
             diarization_device=self.config.get("diarization_device") or "auto",
             diarization_threshold=float(self.config.get("diarization_threshold") or 0.8),
             diarization_compute_type=self.config.get("diarization_compute_type") or "auto",
+            diarization_offline_mode=bool(self.config.get("diarization_offline_mode")),
+            diarization_allow_download=bool(self.config.get("diarization_allow_download")),
         )
 
     def start_processing(self):
@@ -1026,9 +1100,23 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(True)
         self.worker.update_processing_settings(self._build_processing_settings())
         self.worker.resume_processing()
-        
+
+        # Refresh diarization flags for tasks that were added before the toggle was changed.
+        enable_diarization = bool(self.config.get("enable_diarization"))
+        diarization_num_speakers = int(self.config.get("diarization_num_speakers") or 0)
+        diarization_device = self.config.get("diarization_device") or "auto"
+        diarization_compute = self.config.get("diarization_compute_type") or "auto"
+        diarization_offline = bool(self.config.get("diarization_offline_mode"))
+        diarization_allow_download = bool(self.config.get("diarization_allow_download"))
+
         count = 0
         for task in queued:
+            task.enable_diarization = enable_diarization
+            task.num_speakers = diarization_num_speakers if diarization_num_speakers > 0 else None
+            task.diarization_device = diarization_device
+            task.diarization_compute_type = diarization_compute
+            task.diarization_offline_mode = diarization_offline
+            task.diarization_allow_download = diarization_allow_download
             # Reset status if needed
             if task.status in ("pending", "failed"):
                 task.status = "queued"

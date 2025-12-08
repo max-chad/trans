@@ -8,6 +8,31 @@ import torchaudio
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from sklearn.cluster import AgglomerativeClustering
+from inspect import signature
+
+# Compatibility shim: newer huggingface_hub removed `use_auth_token`, but
+# SpeechBrain still passes it. Provide a wrapper so both signatures work.
+try:
+    import huggingface_hub
+
+    _hf_download_sig = signature(huggingface_hub.hf_hub_download)
+    if "use_auth_token" not in _hf_download_sig.parameters:
+        _orig_hf_hub_download = huggingface_hub.hf_hub_download
+
+        def _hf_hub_download_compat(*args, use_auth_token=None, token=None, **kwargs):
+            if use_auth_token is not None and token is None:
+                token = use_auth_token
+            return _orig_hf_hub_download(*args, token=token, **kwargs)
+
+        huggingface_hub.hf_hub_download = _hf_hub_download_compat  # type: ignore[attr-defined]
+        try:
+            from huggingface_hub import file_download as _hf_file_download
+
+            _hf_file_download.hf_hub_download = _hf_hub_download_compat  # type: ignore[attr-defined]
+        except Exception:
+            pass
+except Exception:
+    huggingface_hub = None
 
 # SpeechBrain (1.0.3) still expects torchaudio.list_audio_backends, which was
 # removed in torchaudio 2.9+. Provide a tiny compatibility shim so the import
@@ -63,11 +88,14 @@ class DiarizationService:
     ]
     OPTIONAL_LABEL_FILES = ["label_encoder.ckpt", "label_encoder.txt"]
 
-    def __init__(self, device: str = "auto", compute_type: str = "auto"):
+    def __init__(self, device: str = "auto", compute_type: str = "auto",
+                 offline_mode: bool = True, allow_download: bool = False):
         """
         Args:
             device: Preferred device ('cpu', 'cuda', 'auto', or explicit CUDA id like 'cuda:0').
             compute_type: Precision ('auto', 'float16', 'float32', 'bfloat16').
+            offline_mode: If True (default), prevents network access for model downloads.
+            allow_download: If True, overrides offline_mode to allow model downloads.
         """
         self.logger = logging.getLogger(__name__)
         self.requested_device = (device or "auto").lower()
@@ -76,8 +104,11 @@ class DiarizationService:
         self.classifier = None
         self._model_device: Optional[str] = None
         self._resamplers: Dict[Tuple[int, int, str], torchaudio.transforms.Resample] = {}
-        # Allow download by default; set SPEECHBRAIN_ALLOW_DOWNLOAD=0 to force offline.
-        self.offline = not _env_flag("SPEECHBRAIN_ALLOW_DOWNLOAD", True)
+        # Offline if offline_mode=True and allow_download=False.
+        # allow_download overrides offline_mode when True.
+        # Also respect the environment variable as a fallback.
+        env_allow = _env_flag("SPEECHBRAIN_ALLOW_DOWNLOAD", False)
+        self.offline = offline_mode and not allow_download and not env_allow
         self.repo_root = Path(__file__).resolve().parent.parent
         self.savedir = self.repo_root / "pretrained_models" / "spkrec-ecapa-voxceleb"
         try:
@@ -85,6 +116,107 @@ class DiarizationService:
         except Exception:
             # Not all builds expose set_audio_backend (or the soundfile backend), but we still fall back below.
             pass
+
+    def _materialize_existing_model_files(self) -> None:
+        """
+        Replace hub-created symlinks with real files to avoid Windows file-lock errors
+        when copying/downloading into the target directory.
+        """
+        candidates = self.REQUIRED_FILES + self.OPTIONAL_LABEL_FILES + ["custom.py"]
+        for name in candidates:
+            path = self.savedir / name
+            if not path.exists() or not path.is_symlink():
+                continue
+            try:
+                target = path.resolve()
+                tmp = path.with_suffix(path.suffix + ".tmpcopy")
+                shutil.copy2(target, tmp)
+                path.unlink(missing_ok=True)
+                tmp.replace(path)
+                self.logger.info(f"Replaced symlink with local copy: {name}")
+            except Exception as exc:
+                self.logger.warning(f"Could not replace symlink {path}: {exc}")
+
+    def _ensure_custom_module(self) -> Path:
+        """
+        SpeechBrain tries to fetch 'custom.py' even when the upstream repo does not ship one.
+        Create a local placeholder to short-circuit that fetch and avoid 404 errors.
+        """
+        self.savedir.mkdir(parents=True, exist_ok=True)
+        custom_py = self.savedir / "custom.py"
+        if custom_py.exists():
+            return custom_py
+        try:
+            custom_py.write_text(
+                "# Placeholder to satisfy SpeechBrain custom module fetch; upstream repo has no custom.py\n",
+                encoding="utf-8",
+            )
+            self.logger.info("Created placeholder custom.py to bypass missing file on the hub.")
+        except Exception as exc:
+            self.logger.warning(f"Unable to create placeholder custom.py: {exc}")
+        return custom_py
+
+    def download_models(self) -> None:
+        """
+        Explicitly download model files to the local directory.
+        This allows fully offline usage later.
+        """
+        if not SPEECHBRAIN_AVAILABLE:
+             raise ImportError(f"SpeechBrain is not available: {SPEECHBRAIN_ERROR}")
+
+        self.logger.info(f"Downloading SpeechBrain models to {self.savedir}...")
+        self.savedir.mkdir(parents=True, exist_ok=True)
+        # Ensure we have a local custom.py so SpeechBrain doesn't try to fetch a non-existent one.
+        self._ensure_custom_module()
+        # Convert any existing symlinks to real files before copying over them.
+        self._materialize_existing_model_files()
+        
+        try:
+            # We must fetch all required files
+            files_to_fetch = self.REQUIRED_FILES + self.OPTIONAL_LABEL_FILES
+            
+            for filename in files_to_fetch:
+                try:
+                    self.logger.info(f"Fetching {filename}...")
+                    
+                    # 1. Download to HF cache (no symlinks involved yet if we just get the path)
+                    # Use the compat shim we defined or the imported one
+                    cached_path = huggingface_hub.hf_hub_download(
+                        repo_id=self.MODEL_ID,
+                        filename=filename,
+                        use_auth_token=None
+                    )
+                    
+                    # 2. Copy to target directory (bypassing symlink creation)
+                    target_path = self.savedir / filename
+                    if target_path.is_symlink():
+                        target_path.unlink(missing_ok=True)
+                    tmp_path = target_path.with_suffix(target_path.suffix + ".tmpcopy")
+                    shutil.copy2(cached_path, tmp_path)
+                    tmp_path.replace(target_path)
+                    
+                except Exception as e:
+                    if filename in self.OPTIONAL_LABEL_FILES:
+                        self.logger.warning(f"Optional file {filename} could not be downloaded: {e}")
+                    else:
+                        raise e
+                        
+            self.logger.info("All diarization models downloaded successfully.")
+            
+        except ImportError:
+             self.logger.info("Using EncoderClassifier load to trigger download...")
+             original_offline = self.offline
+             self.offline = False
+             os.environ["SPEECHBRAIN_ALLOW_DOWNLOAD"] = "1"
+             
+             try:
+                 self.load_model()
+                 self.unload_model()
+             finally:
+                 self.offline = original_offline
+                 if self.offline:
+                     os.environ["SPEECHBRAIN_ALLOW_DOWNLOAD"] = "0"
+
 
     def _resolve_device(self, requested: str) -> str:
         if requested == "auto":
@@ -112,6 +244,10 @@ class DiarizationService:
             hf_home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
             os.environ.setdefault("HF_HOME", str(hf_home))
             self.savedir.mkdir(parents=True, exist_ok=True)
+            # Avoid fetching a non-existent custom.py from the hub.
+            self._ensure_custom_module()
+            # Replace any lingering symlinks with real files to avoid copy failures.
+            self._materialize_existing_model_files()
 
             if not self._has_local_model():
                 copied = self._copy_from_hf_cache(Path(hf_home))

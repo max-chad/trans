@@ -23,11 +23,14 @@ from .audio import (
     group_segments_by_speaker,
     build_word_timeline,
 )
-from .device import DeviceContext, configure_cuda_dll_search_path
+from .device import DeviceContext, configure_cuda_dll_search_path, _CUDA_DLL_PATHS
 from .diarization import DiarizationService
 from .gpu_detection import get_optimal_compute_type
 
 # Добавляем CUDA-библиотеки в системные пути, чтобы Whisper мог работать на GPU в Windows.
+
+# Keeps CUDA PATH logging to a single occurrence per process.
+_CUDA_PATH_LOGGED = False
 
 
 if os.name == "nt":
@@ -107,7 +110,13 @@ class TranscriptionWorker(QThread):
         self._active_transcriptions = 0
         diar_device = os.getenv("DIARIZATION_DEVICE", "auto")
         self._diarization_device = diar_device
-        self.diarization = DiarizationService(device=diar_device, compute_type="auto")
+        # Initial defaults; will be updated by settings
+        self.diarization = DiarizationService(
+            device=diar_device, 
+            compute_type="auto",
+            offline_mode=True,
+            allow_download=False
+        )
 
     # Обновляем параметры обработки и при необходимости запускаем или завершаем фазу корректировки.
     def update_processing_settings(self, settings: ProcessingSettings):
@@ -120,9 +129,17 @@ class TranscriptionWorker(QThread):
                 pending_flush = list(self._staged_corrections)
                 self._staged_corrections.clear()
                 self._in_correction_phase = False
-            if getattr(settings, "diarization_device", None) or getattr(settings, "diarization_compute_type", None):
+            
+            # Use getattr for safety if settings are partial, though usually full object is passed
+            diar_changed = (
+                getattr(settings, "diarization_device", None) or 
+                getattr(settings, "diarization_compute_type", None) or
+                getattr(settings, "diarization_offline_mode", None) is not None or
+                getattr(settings, "diarization_allow_download", None) is not None
+            )
+            
+            if diar_changed:
                 self.set_diarization_device(settings.diarization_device)
-                # Note: set_diarization_device now reads compute_type from self.settings, which was just updated above.
         if pending_flush:
             for task in pending_flush:
                 self._dispatch_correction(task)
@@ -194,7 +211,15 @@ class TranscriptionWorker(QThread):
         self._diarization_device = resolved
         # Use current settings for compute type if available, else auto
         compute_type = getattr(self.settings, "diarization_compute_type", "auto")
-        self.diarization = DiarizationService(device=resolved, compute_type=compute_type)
+        offline = getattr(self.settings, "diarization_offline_mode", True)
+        allow_download = getattr(self.settings, "diarization_allow_download", False)
+        
+        self.diarization = DiarizationService(
+            device=resolved,
+            compute_type=compute_type,
+            offline_mode=offline,
+            allow_download=allow_download
+        )
 
     # Загружаем пайплайн diarization от pyannote и кэшируем его для повторного использования.
     @staticmethod

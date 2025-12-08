@@ -98,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gui_parser.set_defaults(command="gui")
 
+    download_parser = subparsers.add_parser(
+        "download-models",
+        help="Загрузить модели для диаризации (для полностью локального использования).",
+    )
+    download_parser.set_defaults(command="download_models")
+
     batch_parser = subparsers.add_parser(
         "batch",
         help="Run transcript batch analysis, rewrite, and story workflows.",
@@ -111,6 +117,8 @@ def build_parser() -> argparse.ArgumentParser:
 def run_cli(args: argparse.Namespace) -> int:
     if args.command == "transcribe":
         return _run_transcribe_command(args)
+    if args.command == "download_models":
+        return _run_download_models(args)
     if args.command == "batch":
         return _run_batch_command(args)
     print("??????????? ???????. ??????????? 'gui', 'batch', ??? 'transcribe'.", file=sys.stderr)
@@ -437,3 +445,19 @@ class _ConsoleReporter:
             return
         self._last_progress = value
         print(f"Прогресс: {value}%")
+
+
+def _run_download_models(args: argparse.Namespace) -> int:
+    from .diarization import DiarizationService
+    
+    print("Initializing DiarizationService for download...")
+    # Force allow_download=True for this specific command
+    service = DiarizationService(device="cpu", offline_mode=False, allow_download=True)
+    try:
+        service.download_models()
+        print("Success: Diarization models downloaded.")
+        return 0
+    except Exception as e:
+        print(f"Error downloading models: {e}", file=sys.stderr)
+        return 1
+

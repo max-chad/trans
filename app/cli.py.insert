@@ -1,0 +1,14 @@
+
+def _run_download_models(args: argparse.Namespace) -> int:
+    from .diarization import DiarizationService
+    
+    print("Initializing DiarizationService for download...")
+    # Force allow_download=True for this specific command
+    service = DiarizationService(device="cpu", offline_mode=False, allow_download=True)
+    try:
+        service.download_models()
+        print("Success: Diarization models downloaded.")
+        return 0
+    except Exception as e:
+        print(f"Error downloading models: {e}", file=sys.stderr)
+        return 1

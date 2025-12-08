@@ -103,6 +103,8 @@ class AppConfig:
             "diarization_compute_type": "auto",
             "batched_inference_enabled": True,
             "batched_inference_batch_size": 16,
+            "diarization_offline_mode": True,
+            "diarization_allow_download": False,
         }
         self.settings = self.load_config()
 
@@ -250,6 +252,8 @@ class AppConfig:
             "window_maximized",
             "deep_correction_enabled",
             "enable_diarization",
+            "diarization_offline_mode",
+            "diarization_allow_download",
         }:
             return bool(self.settings.get(key, self.defaults.get(key, False)))
         return self.settings.get(key, self.defaults.get(key))

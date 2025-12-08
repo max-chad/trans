@@ -50,6 +50,8 @@ class TranscriptionTask:
     diarization_compute_type: str = "auto"
     batched_inference_enabled: bool = True
     batched_inference_batch_size: int = 16
+    diarization_offline_mode: bool = True
+    diarization_allow_download: bool = False
 
 
 @dataclass
@@ -83,3 +85,5 @@ class ProcessingSettings:
     diarization_compute_type: str = "auto"
     batched_inference_enabled: bool = True
     batched_inference_batch_size: int = 16
+    diarization_offline_mode: bool = True
+    diarization_allow_download: bool = False

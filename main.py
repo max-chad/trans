@@ -1,4 +1,5 @@
 import sys
+import os
 import warnings
 from pathlib import Path
 
@@ -18,6 +19,9 @@ warnings.filterwarnings(
 
 
 def launch_gui(config_path: Path | None = None) -> int:
+    # Filter SYMLINK warning early
+    warnings.filterwarnings("ignore", message=".*SYMLINK strategy.*", category=UserWarning)
+
     # Import torch before any PyQt modules to avoid Windows DLL init issues with CUDA wheels.
     import torch  # noqa: F401
     from ui.splash_screen import SplashScreen
@@ -33,6 +37,9 @@ def launch_gui(config_path: Path | None = None) -> int:
 
     splash = SplashScreen()
     splash.show()
+    
+    # Process events to ensure splash shows up
+    app.processEvents()
 
     main_window = MainWindow(config)
 
@@ -46,21 +53,33 @@ def launch_gui(config_path: Path | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args:
-        return launch_gui()
-    if args == ["gui"]:
-        return launch_gui()
+    try:
+        # Construct absolute path to the .env file
+        # This workaround forces HF/SpeechBrain to avoid symlinks on Windows
+        os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+        os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+        
+        args = list(sys.argv[1:] if argv is None else argv)
+        if not args:
+            return launch_gui()
+        if args == ["gui"]:
+            return launch_gui()
 
-    from app.cli import build_parser, run_cli
+        from app.cli import build_parser, run_cli
 
-    parser = build_parser()
-    parsed = parser.parse_args(args)
-    if parsed.command in (None, "gui"):
-        return launch_gui()
-    return run_cli(parsed)
+        parser = build_parser()
+        parsed = parser.parse_args(args)
+        if parsed.command in (None, "gui"):
+            return launch_gui()
+        return run_cli(parsed)
+    except BaseException as e:
+        print(f"CRITICAL ERROR: {e!r}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
+    # Also catch sys.exit if possible, but sys.exit(main()) handles return code
     sys.exit(main())
    
